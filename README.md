@@ -77,10 +77,6 @@ Na koniec skrypt pyta o restart Nautilusa. Restart przerywa trwające kopiowanie
 | `help` | pomoc |
 | `--lang pl\|en` | język komunikatów instalatora; domyślnie z `LANG`/`LANGUAGE` |
 
-### Aktualizacja z wersji 1
-
-Wersja 1 (`libnautilus-video-duration.so`, tylko MP4/MOV) jest usuwana automatycznie podczas instalacji, żeby kolumna „Czas trwania” się nie dublowała. Wewnętrzna nazwa tej kolumny (`video_duration`) pozostała ta sama, więc zapisane układy kolumn działają dalej.
-
 ---
 
 ## Użycie
@@ -146,7 +142,7 @@ W terminalu pojawi się komunikat o załadowaniu rozszerzenia oraz, dla każdego
 
 ---
 
-## Co zostało sprawdzone
+## Co zostało sprawdzone (Claude Code)
 
 - Kompilacja bez ostrzeżeń (`-Wall -Wextra -Wshadow -Wconversion`) z nagłówkami Nautilusa **43.0** (Debian 12), **46.4** (Ubuntu 24.04) i **50.1** (Fedora 44, Arch).
 - 35 plików testowych wygenerowanych przez ffmpeg 6.1 we wszystkich formatach z tabeli. Czas zgadza się z ffprobe do 0,05 s, a wymiary dokładnie, z obrotem 90°/180°/270°. Wyjątek to AAC ADTS: ffprobe szacuje tam z bitrate (30,25 s), a rozszerzenie liczy ramki (30,53 s przy nagraniu 30,5 s).
