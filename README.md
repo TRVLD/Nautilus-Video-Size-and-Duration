@@ -8,6 +8,9 @@ Rozszerzenie menedżera plików **Nautilus (Pliki)** dla GNOME, które dodaje w 
 | Szerokość (px) | Width (px) | szerokość klatki wideo w pikselach |
 | Wysokość (px) | Height (px) | wysokość klatki wideo w pikselach |
 
+<img width="881" height="840" alt="image" src="https://github.com/user-attachments/assets/e9f17ffc-fa20-461d-9405-3da9b03ed31c" />
+
+
 Pliki audio mają wypełniony tylko czas trwania. Nazwy kolumn są po polsku albo po angielsku, zależnie od języka sesji.
 
 Całość to jeden plik `nautilus-video-size-duration.sh`. Zawiera kod rozszerzenia w C, sam instaluje potrzebne pakiety, kompiluje i instaluje wtyczkę.
