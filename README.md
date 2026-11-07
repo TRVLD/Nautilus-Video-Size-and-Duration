@@ -2,7 +2,6 @@
 
 Rozszerzenie Nautilusa (Pliki, GNOME) · wersja 2.6.0 · M.T. Jaroszek · [EUPL-1.2](LICENSE)
 
-<img width="881" height="840" alt="image" src="https://github.com/user-attachments/assets/e9f17ffc-fa20-461d-9405-3da9b03ed31c" />
 - **Widok listy:** sortowalne kolumny **Czas trwania**, **Szerokość (px)** i **Wysokość (px)** (PL/EN).
 - **Widok siatki:** czas w lewym górnym rogu miniatury (`▶ 2m 4s`, `♪ 3m 24s`).
 - **Porządkowanie:** menu widoku → **Audio i wideo** (także pod prawym klikiem): ▼ od najdłuższych/największych, ▲ od najkrótszych/najmniejszych.
