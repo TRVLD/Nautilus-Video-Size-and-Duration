@@ -1,42 +1,27 @@
 #!/usr/bin/env bash
-# =============================================================================
-#  Nautilus Video Size and Duration — instalator / installer            v2.0.1
-#
-#  PL: Rozszerzenie Nautilusa (C, API 4, Nautilus 43+) z kolumnami „Czas trwania”,
-#      „Szerokość (px)” i „Wysokość (px)” dla plików audio i wideo.
-#  EN: Nautilus extension (C, API 4, Nautilus 43+) adding "Duration", "Width (px)"
-#      and "Height (px)" columns for audio and video files.
-#
-#  Fedora / RHEL (dnf) · Debian / Ubuntu / Mint (apt) · Arch / Manjaro (pacman)
-#  · openSUSE (zypper, bez testów / untested)
-#
-#  Użycie / usage:
-#    ./nautilus-video-size-duration.sh [install] [--show-by-default] [--lang pl|en]
-#    ./nautilus-video-size-duration.sh uninstall
-#    ./nautilus-video-size-duration.sh build      # tylko .so do bieżącego katalogu
-#    ./nautilus-video-size-duration.sh source     # zapisuje kod C do bieżącego katalogu
-#    ./nautilus-video-size-duration.sh help
-#
-#  Copyright (C) 2026 M.T. Jaroszek
-#  SPDX-License-Identifier: EUPL-1.2
-#  Licensed under the EUPL, Version 1.2 only. You may not use this work except
-#  in compliance with the Licence: https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12
-# =============================================================================
+# Nautilus Video Size and Duration v2.6.0
+# Copyright (C) 2026 M.T. Jaroszek
+# SPDX-License-Identifier: EUPL-1.2
 set -euo pipefail
 
-readonly NVSD_VERSION="2.0.1"
+readonly NVSD_VERSION="2.6.0"
 readonly EXT_NAME="nautilus-video-size-duration"
 readonly SO="lib${EXT_NAME}.so"
-readonly OLD_SO="libnautilus-video-duration.so"          # wersja 1 (tylko MP4/MOV)
-readonly PC="libnautilus-extension-4"                    # API 4 = Nautilus 43+
+readonly OLD_SO="libnautilus-video-duration.so"
+readonly PC="libnautilus-extension-4"
 readonly SCHEMA="org.gnome.nautilus.list-view"
 readonly KEY="default-visible-columns"
 readonly NVSD_COLUMNS=(video_duration video_width video_height)
-readonly OS_RELEASE="${NVSD_OS_RELEASE:-/etc/os-release}"  # zmienna tylko do testów
+readonly OS_RELEASE="${NVSD_OS_RELEASE:-/etc/os-release}"
 
-# -----------------------------------------------------------------------------
-#  Język komunikatów / message language
-# -----------------------------------------------------------------------------
+readonly THUMB_BIN="/usr/local/bin/${EXT_NAME}-thumbnailer"
+readonly THUMB_FILE="${EXT_NAME}.thumbnailer"
+readonly THUMB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/thumbnailers"
+readonly THUMB_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/thumbnails"
+readonly VIDEO_MIMES="video/mp4;video/x-m4v;video/mp4v-es;video/quicktime;video/3gpp;video/3gp;video/3gpp2;video/matroska;video/x-matroska;video/webm;video/x-msvideo;video/msvideo;video/vnd.avi;video/avi;video/x-avi;video/divx;video/vnd.divx;video/x-ms-wmv;video/x-ms-asf;video/x-ms-wm;video/ogg;video/x-ogg;video/x-theora+ogg;video/x-theora;video/x-ogm+ogg;application/vnd.ms-asf;"
+readonly AUDIO_MIMES="audio/mpeg;audio/mp3;audio/x-mp3;audio/mpg;audio/x-mpeg;audio/mp2;audio/x-mp2;audio/mp4;audio/m4a;audio/x-m4a;audio/x-m4b;audio/aac;audio/x-aac;audio/x-hx-aac-adts;audio/flac;audio/x-flac;audio/ogg;audio/x-ogg;audio/vorbis;audio/x-vorbis;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/x-speex;audio/x-speex+ogg;audio/x-flac+ogg;audio/wav;audio/x-wav;audio/vnd.wave;audio/wave;audio/x-ms-wma;audio/matroska;audio/x-matroska;audio/webm;application/ogg;"
+readonly MEDIA_EXT_RE='mp4|m4v|m4a|m4b|mov|3gp|3g2|mkv|mka|webm|avi|wmv|wma|asf|ogg|oga|ogv|opus|spx|flac|wav|mp3|mp2|aac'
+
 UI_LANG=""
 ARGS=()
 while (( $# )); do
@@ -54,10 +39,8 @@ if [[ -z "$UI_LANG" ]]; then
 fi
 [[ "$UI_LANG" == pl || "$UI_LANG" == en ]] || UI_LANG=en
 
-# t "tekst PL" "text EN"
 t() { if [[ "$UI_LANG" == pl ]]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
-# msg/warn/die FORMAT [ARG…] — FORMAT to wynik t(), argumenty jak w printf
 msg()  { local f="$1"; shift; printf "\033[1;34m==>\033[0m $f\n" "$@"; }
 warn() { local f="$1"; shift; printf "\033[1;33m%s\033[0m $f\n" "$(t 'Uwaga:' 'Warning:')" "$@" >&2; }
 die()  { local f="$1"; shift; printf "\033[1;31m%s\033[0m $f\n" "$(t 'Błąd:' 'Error:')" "$@" >&2; exit 1; }
@@ -65,57 +48,41 @@ die()  { local f="$1"; shift; printf "\033[1;31m%s\033[0m $f\n" "$(t 'Błąd:' '
 BUILD_DIR="$(mktemp -d -t "${EXT_NAME}.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-# -----------------------------------------------------------------------------
-#  Kod źródłowy rozszerzenia (C) / extension source code
-# -----------------------------------------------------------------------------
 write_source() {
 cat > "$1" <<'C_SOURCE'
 /*
  * Nautilus Video Size and Duration
- *
- * Rozszerzenie menedżera plików Nautilus (API 4, Nautilus 43+) dodające kolumny
- * „Czas trwania”, „Szerokość (px)” i „Wysokość (px)” w widoku listy.
- * A Nautilus extension (API 4, Nautilus 43+) adding "Duration", "Width (px)"
- * and "Height (px)" columns to the list view.
- *
  * Copyright (C) 2026 M.T. Jaroszek
  * SPDX-License-Identifier: EUPL-1.2
- *
- * Licensed under the EUPL, Version 1.2 only (the "Licence"). You may not use
- * this work except in compliance with the Licence. You may obtain a copy of
- * the Licence at: https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the Licence is distributed on an "AS IS" basis,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *
- * Metadane są czytane bezpośrednio z nagłówków kontenerów (bez GStreamera
- * i ffmpeg), w wątku roboczym. Nautilus sortuje kolumny rozszerzeń funkcją
- * strcmp() na wyświetlanym tekście, więc wartości mają stałą szerokość
- * i są dopełniane spacjami z lewej (kolumny są wyrównane do prawej).
  */
-#define _GNU_SOURCE  /* memmem() */
+#define _GNU_SOURCE
 #define G_LOG_DOMAIN "VideoSizeDuration"
 
+#ifndef VSD_THUMBNAILER
 #include <nautilus-extension.h>
+#include <gmodule.h>
+#endif
 #include <gio/gio.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
-#define VSD_ATTR_DURATION "video_duration"   /* nazwa z wersji 1, zachowana dla zgodności ustawień */
+#define VSD_ATTR_DURATION "video_duration"
 #define VSD_ATTR_WIDTH    "video_width"
 #define VSD_ATTR_HEIGHT   "video_height"
 
-#define VSD_MAX_MEM_READ  (16u * 1024u * 1024u)  /* limit wczytania jednej struktury do pamięci */
+#define VSD_MAX_MEM_READ  (16u * 1024u * 1024u)
 #define VSD_MAX_TRACKS    64
-#define VSD_MAX_LOOP      2000000u               /* bezpiecznik pętli po elementach pliku */
-#define VSD_MAX_SECONDS   1e7                    /* > ~115 dni = uszkodzony nagłówek */
+#define VSD_MAX_LOOP      2000000u
+#define VSD_MAX_SECONDS   1e7
 #define VSD_MAX_DIMENSION 65535u
 
 #define FOURCC(a, b, c, d) \
     (((guint32) (a) << 24) | ((guint32) (b) << 16) | ((guint32) (c) << 8) | (guint32) (d))
 
-/* ===================================================================== */
-/*  Tłumaczenia / translations                                            */
-/* ===================================================================== */
+#ifndef VSD_THUMBNAILER
 
 typedef struct
 {
@@ -123,61 +90,83 @@ typedef struct
     const char *duration_label, *duration_desc;
     const char *width_label, *width_desc;
     const char *height_label, *height_desc;
+    const char *sort_menu, *sort_tip, *sort_section;
+    const char *sort_items[6];
 } VsdStrings;
 
-/* Pierwszy wpis jest domyślny. Nowy język = nowy wiersz. */
 static const VsdStrings vsd_strings[] = {
     { "en",
       "Duration",       "Playing time of audio and video files",
       "Width (px)",     "Video frame width in pixels",
-      "Height (px)",    "Video frame height in pixels" },
+      "Height (px)",    "Video frame height in pixels",
+      "Sort (audio/video)", "Sort the folder by duration or video frame size", "Audio and Video",
+      { "▼ Duration", "▲ Duration",
+        "▼ Width",    "▲ Width",
+        "▼ Height",   "▲ Height" } },
     { "pl",
       "Czas trwania",   "Czas odtwarzania plików audio i wideo",
       "Szerokość (px)", "Szerokość klatki wideo w pikselach",
-      "Wysokość (px)",  "Wysokość klatki wideo w pikselach" },
+      "Wysokość (px)",  "Wysokość klatki wideo w pikselach",
+      "Porządkowanie (audio/wideo)", "Porządkuje folder według czasu trwania lub rozmiaru obrazu", "Audio i wideo",
+      { "▼ Czas trwania", "▲ Czas trwania",
+        "▼ Szerokość",    "▲ Szerokość",
+        "▼ Wysokość",     "▲ Wysokość" } },
 };
 
 static const VsdStrings *
-vsd_pick_strings (void)
+vsd_lookup_strings (void)
 {
-    /* np. { "pl_PL.UTF-8", "pl_PL", "pl", "C" }, zgodnie z LANGUAGE/LC_ALL/LC_MESSAGES/LANG */
     for (const char *const *name = g_get_language_names (); *name != NULL; name++)
     {
         for (gsize i = 0; i < G_N_ELEMENTS (vsd_strings); i++)
         {
             gsize n = strlen (vsd_strings[i].lang);
 
-            /* strncmp najpierw: dopiero po dopasowaniu wiadomo, że nazwa ma >= n znaków. */
             if (strncmp (*name, vsd_strings[i].lang, n) == 0 &&
-                strchr ("_.@", (*name)[n]) != NULL)  /* strchr znajduje też '\0' */
+                strchr ("_.@", (*name)[n]) != NULL)
                 return &vsd_strings[i];
         }
     }
     return &vsd_strings[0];
 }
 
-/* ===================================================================== */
-/*  Odczyt pliku i pomocnicze                                             */
-/* ===================================================================== */
+static const VsdStrings *
+vsd_pick_strings (void)
+{
+    static gsize picked = 0;
+
+    if (g_once_init_enter (&picked))
+        g_once_init_leave (&picked, (gsize) vsd_lookup_strings ());
+    return (const VsdStrings *) picked;
+}
+#endif
+
+#define VSD_CACHE_SIZE 4096
+#define VSD_CACHE_MIN  256
 
 typedef struct
 {
+    int           fd;
     GInputStream *in;
     GCancellable *cancellable;
     guint64       size;
+    guint64       cache_off;
+    gsize         cache_len;
+    gboolean      cache_used;
+    guint8        cache[VSD_CACHE_SIZE];
 } VsdReader;
 
 typedef struct
 {
-    double      seconds;  /* <= 0: nieznany */
-    guint32     width;    /* 0: brak obrazu */
+    double      seconds;
+    guint32     width;
     guint32     height;
-    const char *format;   /* tylko do logów */
+    const char *format;
 } VsdMedia;
 
 enum
 {
-    VSD_HINT_MPEG_AUDIO = 1 << 0,  /* .mp3/.aac/audio/mpeg: szukaj ramek także za śmieciami */
+    VSD_HINT_MPEG_AUDIO = 1 << 0,
 };
 
 static inline guint16 rd_be16 (const guint8 *p) { return (guint16) ((p[0] << 8) | p[1]); }
@@ -189,17 +178,33 @@ static inline guint32 rd_le32 (const guint8 *p) { return p[0] | ((guint32) p[1] 
 static inline guint64 rd_le64 (const guint8 *p) { return rd_le32 (p) | ((guint64) rd_le32 (p + 4) << 32); }
 
 static gboolean
-vsd_read_at (VsdReader *r,
-             guint64    offset,
-             void      *buf,
-             gsize      len)
+vsd_read_raw (VsdReader *r,
+              guint64    offset,
+              void      *buf,
+              gsize      len)
 {
     gsize got = 0;
 
-    if (len == 0)
-        return TRUE;
-    if (offset > (guint64) G_MAXINT64 || offset >= r->size || len > r->size - offset)
+    if (g_cancellable_is_cancelled (r->cancellable))
         return FALSE;
+    if (r->fd >= 0)
+    {
+        guint8 *p = buf;
+
+        while (len > 0)
+        {
+            ssize_t n = pread (r->fd, p, len, (off_t) offset);
+
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n <= 0)
+                return FALSE;
+            p += n;
+            offset += (guint64) n;
+            len -= (gsize) n;
+        }
+        return TRUE;
+    }
     if (!g_seekable_seek (G_SEEKABLE (r->in), (goffset) offset, G_SEEK_SET, r->cancellable, NULL))
         return FALSE;
     if (!g_input_stream_read_all (r->in, buf, len, &got, r->cancellable, NULL))
@@ -207,7 +212,36 @@ vsd_read_at (VsdReader *r,
     return got == len;
 }
 
-/* Czyta do len bajtów (mniej przy końcu pliku). Zwraca liczbę odczytanych. */
+static gboolean
+vsd_read_at (VsdReader *r,
+             guint64    offset,
+             void      *buf,
+             gsize      len)
+{
+    if (len == 0)
+        return TRUE;
+    if (offset > (guint64) G_MAXINT64 || offset >= r->size || len > r->size - offset)
+        return FALSE;
+    if (len > VSD_CACHE_SIZE)
+        return vsd_read_raw (r, offset, buf, len);
+    if (r->cache_len == 0 || offset < r->cache_off || offset + len > r->cache_off + r->cache_len)
+    {
+        gsize want = (r->cache_len == 0 || r->cache_used) ? VSD_CACHE_SIZE : MAX (len, VSD_CACHE_MIN);
+        gsize fill = (gsize) MIN ((guint64) want, r->size - offset);
+
+        r->cache_len = 0;
+        if (!vsd_read_raw (r, offset, r->cache, fill))
+            return FALSE;
+        r->cache_off = offset;
+        r->cache_len = fill;
+        r->cache_used = FALSE;
+    }
+    else
+        r->cache_used = TRUE;
+    memcpy (buf, r->cache + (offset - r->cache_off), len);
+    return TRUE;
+}
+
 static gsize
 vsd_read_some (VsdReader *r,
                guint64    offset,
@@ -220,7 +254,6 @@ vsd_read_some (VsdReader *r,
     return vsd_read_at (r, offset, buf, len) ? len : 0;
 }
 
-/* Wczytuje fragment do nowego bufora; NULL przy błędzie lub zbyt dużym rozmiarze. */
 static guint8 *
 vsd_read_alloc (VsdReader *r,
                 guint64    offset,
@@ -246,7 +279,7 @@ vsd_media_add_video (VsdMedia *m,
 {
     if (width == 0 || height == 0 || width > VSD_MAX_DIMENSION || height > VSD_MAX_DIMENSION)
         return;
-    /* Kilka strumieni wideo: pokazujemy największy. */
+
     if ((guint64) width * height > (guint64) m->width * m->height)
     {
         m->width = width;
@@ -266,10 +299,6 @@ vsd_fourcc_printable (guint32 type)
     return TRUE;
 }
 
-/* ===================================================================== */
-/*  ISO BMFF / QuickTime: MP4, M4V, M4A, MOV, 3GP                         */
-/* ===================================================================== */
-
 enum
 {
     BOX_FTYP = FOURCC ('f', 't', 'y', 'p'), BOX_MOOV = FOURCC ('m', 'o', 'o', 'v'),
@@ -285,40 +314,44 @@ enum
     BOX_MOOF = FOURCC ('m', 'o', 'o', 'f'), BOX_TRAF = FOURCC ('t', 'r', 'a', 'f'),
     BOX_TFHD = FOURCC ('t', 'f', 'h', 'd'), BOX_TFDT = FOURCC ('t', 'f', 'd', 't'),
     BOX_TRUN = FOURCC ('t', 'r', 'u', 'n'),
+    BOX_MFRA = FOURCC ('m', 'f', 'r', 'a'), BOX_MFRO = FOURCC ('m', 'f', 'r', 'o'),
+    BOX_TFRA = FOURCC ('t', 'f', 'r', 'a'),
     HDLR_VIDE = FOURCC ('v', 'i', 'd', 'e'),
 };
 
 typedef struct
 {
     guint32 type;
-    guint64 start;  /* początek boxa w pliku */
-    guint64 size;   /* razem z nagłówkiem */
-    guint64 hdr;    /* 8 lub 16 */
+    guint64 start;
+    guint64 size;
+    guint64 hdr;
 } VsdBox;
 
 typedef struct
 {
     guint32       type;
-    const guint8 *data;  /* zawartość bez nagłówka */
+    const guint8 *data;
     gsize         len;
 } VsdMemBox;
 
 typedef struct
 {
     guint32 id;
-    guint32 timescale;      /* mdhd */
-    guint64 end;            /* koniec ścieżki w jednostkach timescale */
-    guint32 trex_duration;  /* mvex/trex: domyślny czas próbki */
+    guint32 timescale;
+    guint64 end;
+    guint32 trex_duration;
 } VsdTrack;
 
 typedef struct
 {
-    guint32  timescale;     /* mvhd */
-    guint64  duration;      /* mvhd */
-    guint64  mehd;          /* mvex/mehd: łączny czas pliku fragmentowanego */
-    gboolean fragmented;    /* moov zawiera mvex */
+    guint32  timescale;
+    guint64  duration;
+    guint64  mehd;
+    gboolean fragmented;
     gboolean saw_moof;
-    GArray  *tracks;        /* VsdTrack */
+    gboolean missing_tfdt;
+    guint    trafs;
+    GArray  *tracks;
 } VsdMovie;
 
 static gboolean
@@ -334,7 +367,6 @@ vsd_bmff_known_box (guint32 type)
     }
 }
 
-/* Nagłówek boxa leżącego w [offset, end). FALSE = koniec albo uszkodzenie. */
 static gboolean
 vsd_read_box (VsdReader *r,
               guint64    offset,
@@ -360,7 +392,7 @@ vsd_read_box (VsdReader *r,
     }
     else if (size == 0)
     {
-        size = end - offset;  /* box sięga do końca rodzica / pliku */
+        size = end - offset;
     }
 
     if (size < box->hdr || size > end - offset)
@@ -371,7 +403,6 @@ vsd_read_box (VsdReader *r,
     return TRUE;
 }
 
-/* Pierwsze dziecko danego typu. */
 static gboolean
 vsd_find_child (VsdReader    *r,
                 const VsdBox *parent,
@@ -450,7 +481,6 @@ vsd_track (VsdMovie *movie,
     return &g_array_index (movie->tracks, VsdTrack, movie->tracks->len - 1);
 }
 
-/* mvhd i mdhd mają ten sam układ pól timescale/duration. */
 static gboolean
 vsd_parse_time_header (VsdReader    *r,
                        const VsdBox *box,
@@ -470,7 +500,7 @@ vsd_parse_time_header (VsdReader    *r,
         *timescale = rd_be32 (p + 20);
         *duration = rd_be64 (p + 24);
         if (*duration == G_MAXUINT64)
-            *duration = 0;  /* „nieznany” */
+            *duration = 0;
     }
     else
     {
@@ -507,7 +537,7 @@ vsd_parse_trak (VsdReader    *r,
 
             if (n >= 24 && vsd_read_at (r, box.start + box.hdr, p, n))
             {
-                gsize mo = p[0] == 1 ? 52 : 40;  /* przesunięcie macierzy transformacji */
+                gsize mo = p[0] == 1 ? 52 : 40;
 
                 id = rd_be32 (p + (p[0] == 1 ? 20 : 12));
                 have_id = TRUE;
@@ -516,7 +546,6 @@ vsd_parse_trak (VsdReader    *r,
                     gint32 a = (gint32) rd_be32 (p + mo), b = (gint32) rd_be32 (p + mo + 4);
                     gint32 c = (gint32) rd_be32 (p + mo + 12), d = (gint32) rd_be32 (p + mo + 16);
 
-                    /* Obrót o 90/270° (np. pionowe nagrania z telefonu). */
                     rotated = a == 0 && d == 0 && b != 0 && c != 0;
                     tk_width = rd_be32 (p + mo + 36) >> 16;
                     tk_height = rd_be32 (p + mo + 40) >> 16;
@@ -545,7 +574,6 @@ vsd_parse_trak (VsdReader    *r,
                     VsdBox stbl, stsd;
                     guint8 p[44];
 
-                    /* Wymiary w pikselach z pierwszego VisualSampleEntry. */
                     if (vsd_find_child (r, &child, BOX_STBL, &stbl) &&
                         vsd_find_child (r, &stbl, BOX_STSD, &stsd) &&
                         stsd.size - stsd.hdr >= sizeof p &&
@@ -661,7 +689,6 @@ vsd_parse_traf (const guint8 *buf,
     gboolean have_tfhd = FALSE, have_tfdt = FALSE;
     guint64 tfdt = 0, fragment = 0, end;
 
-    /* Przejście 1: tfhd (ścieżka, domyślny czas próbki) i tfdt (czas startu). */
     while (vsd_mem_next_box (buf, len, &pos, &box))
     {
         if (box.type == BOX_TFHD && box.len >= 8)
@@ -670,8 +697,8 @@ vsd_parse_traf (const guint8 *buf,
 
             tfhd_flags = rd_be32 (box.data) & 0xffffff;
             track_id = rd_be32 (box.data + 4);
-            if (tfhd_flags & 0x000001) p += 8;  /* base-data-offset */
-            if (tfhd_flags & 0x000002) p += 4;  /* sample-description-index */
+            if (tfhd_flags & 0x000001) p += 8;
+            if (tfhd_flags & 0x000002) p += 4;
             if ((tfhd_flags & 0x000008) && box.len >= p + 4)
                 default_duration = rd_be32 (box.data + p);
             have_tfhd = TRUE;
@@ -697,11 +724,13 @@ vsd_parse_traf (const guint8 *buf,
     track = vsd_track (movie, track_id, FALSE);
     if (track == NULL || track->timescale == 0)
         return;
+    movie->trafs++;
+    if (!have_tfdt)
+        movie->missing_tfdt = TRUE;
 
     if (!(tfhd_flags & 0x000008))
         default_duration = track->trex_duration;
 
-    /* Przejście 2: suma czasów próbek ze wszystkich trun. */
     pos = 0;
     while (vsd_mem_next_box (buf, len, &pos, &box))
     {
@@ -713,16 +742,16 @@ vsd_parse_traf (const guint8 *buf,
 
         flags = rd_be32 (box.data) & 0xffffff;
         count = rd_be32 (box.data + 4);
-        if (flags & 0x000001) p += 4;  /* data-offset */
-        if (flags & 0x000004) p += 4;  /* first-sample-flags */
+        if (flags & 0x000001) p += 4;
+        if (flags & 0x000004) p += 4;
 
-        if (flags & 0x000100)  /* czas zapisany przy każdej próbce */
+        if (flags & 0x000100)
         {
-            gsize stride = 4 * (((flags & 0x100) != 0) + ((flags & 0x200) != 0) +
-                                ((flags & 0x400) != 0) + ((flags & 0x800) != 0));
+            gsize stride = 4 * (gsize) (((flags & 0x100) != 0) + ((flags & 0x200) != 0) +
+                                        ((flags & 0x400) != 0) + ((flags & 0x800) != 0));
 
             if (p > box.len || (box.len - p) / stride < count)
-                continue;  /* uszkodzony trun */
+                continue;
             for (guint32 i = 0; i < count; i++)
                 fragment += rd_be32 (box.data + p + (gsize) i * stride);
         }
@@ -758,6 +787,214 @@ vsd_parse_moof (VsdReader    *r,
 }
 
 static gboolean
+vsd_bmff_mfra_tail (VsdReader *r,
+                    guint64    min_off,
+                    guint64   *moof_off)
+{
+    guint8 t[16];
+    guint64 size, result = G_MAXUINT64;
+    g_autofree guint8 *buf = NULL;
+    VsdMemBox box;
+    gsize pos = 8;
+
+    if (r->size < 32 || !vsd_read_at (r, r->size - 16, t, sizeof t) ||
+        rd_be32 (t) != 16 || rd_be32 (t + 4) != BOX_MFRO)
+        return FALSE;
+    size = rd_be32 (t + 12);
+    if (size < 24 || size > r->size || (buf = vsd_read_alloc (r, r->size - size, size)) == NULL ||
+        rd_be32 (buf) != size || rd_be32 (buf + 4) != BOX_MFRA)
+        return FALSE;
+
+    while (vsd_mem_next_box (buf, (gsize) size, &pos, &box))
+    {
+        guint32 v, lens, count;
+        gsize tsz, osz, esz, p;
+        guint64 track_max = 0;
+
+        if (box.type != BOX_TFRA || box.len < 12)
+            continue;
+        v = box.data[0];
+        lens = rd_be32 (box.data + 8);
+        tsz = v == 1 ? 8 : 4;
+        osz = tsz;
+        esz = tsz + osz + ((lens >> 4) & 3) + 1 + ((lens >> 2) & 3) + 1 + (lens & 3) + 1;
+        if (box.len < 16)
+            continue;
+        count = rd_be32 (box.data + 12);
+        p = 16;
+        if ((box.len - p) / esz < count)
+            continue;
+        for (guint32 i = 0; i < count; i++, p += esz)
+        {
+            guint64 off = osz == 8 ? rd_be64 (box.data + p + tsz) : rd_be32 (box.data + p + tsz);
+            track_max = MAX (track_max, off);
+        }
+        if (track_max > 0)
+            result = MIN (result, track_max);
+    }
+    if (result == G_MAXUINT64 || result < min_off || result >= r->size)
+        return FALSE;
+    *moof_off = result;
+    return TRUE;
+}
+
+static guint
+vsd_bmff_parse_moofs (VsdReader *r,
+                      guint64    off,
+                      VsdMovie  *movie)
+{
+    VsdBox box;
+    guint n = 0;
+
+    for (guint i = 0; i < VSD_MAX_LOOP && vsd_read_box (r, off, r->size, &box); i++)
+    {
+        if (g_cancellable_is_cancelled (r->cancellable) || !vsd_fourcc_printable (box.type))
+            break;
+        if (box.type == BOX_MOOF)
+        {
+            vsd_parse_moof (r, &box, movie);
+            n++;
+        }
+        off += box.size;
+    }
+    return n;
+}
+
+#define VSD_TAIL_MOOFS 8
+#define VSD_TAIL_MIN   (256u * 1024u)
+#define VSD_TAIL_MAX   (8u * 1024u * 1024u)
+#define VSD_WALK_FRAGS 16u
+
+static guint
+vsd_bmff_tail_moofs (VsdReader *r,
+                     guint64    min_off,
+                     guint64    window,
+                     VsdBox    *ring)
+{
+    guint64 start = r->size > window ? r->size - window : 0;
+    g_autofree guint8 *buf = NULL;
+    gsize len, pos = 4;
+    guint seen = 0;
+
+    start = MAX (start, min_off);
+    if (start >= r->size)
+        return 0;
+    len = (gsize) (r->size - start);
+    buf = vsd_read_alloc (r, start, len);
+    if (buf == NULL || len < 24)
+        return 0;
+    while (pos + 20 <= len)
+    {
+        guint8 *hit = memmem (buf + pos, len - pos - 16, "moof", 4);
+        gsize at;
+        guint32 size;
+
+        if (hit == NULL)
+            break;
+        at = (gsize) (hit - buf);
+        pos = at + 1;
+        size = rd_be32 (buf + at - 4);
+        if (size < 24 || (guint64) size > r->size - (start + at - 4) ||
+            memcmp (buf + at + 8, "mfhd", 4) != 0 || rd_be32 (buf + at + 4) != 16)
+            continue;
+        ring[seen % VSD_TAIL_MOOFS] = (VsdBox) { BOX_MOOF, start + at - 4, size, 8 };
+        seen++;
+        pos = at + 20;
+    }
+    return seen;
+}
+
+static guint64
+vsd_bmff_fragment_size (VsdReader *r,
+                        guint64    off)
+{
+    guint64 moof = G_MAXUINT64;
+    VsdBox box;
+
+    for (guint i = 0; i < 8 && vsd_read_box (r, off, r->size, &box); i++)
+    {
+        if (box.type == BOX_MOOF && moof != G_MAXUINT64)
+            return box.start - moof;
+        if (box.type == BOX_MOOF)
+            moof = box.start;
+        else if (box.type == BOX_MDAT && moof != G_MAXUINT64)
+            return box.start + box.size - moof;
+        off += box.size;
+    }
+    return 0;
+}
+
+static gboolean
+vsd_bmff_all_tracks_updated (const VsdMovie *movie,
+                             const GArray   *saved)
+{
+    guint updated = 0, wanted = 0;
+
+    for (guint i = 0; i < saved->len; i++)
+    {
+        const VsdTrack *before = &g_array_index (saved, VsdTrack, i);
+
+        if (before->timescale == 0)
+            continue;
+        wanted++;
+        updated += g_array_index (movie->tracks, VsdTrack, i).end != before->end;
+    }
+    return updated > 0 && updated == wanted;
+}
+
+static void
+vsd_bmff_fragments (VsdReader *r,
+                    guint64    after_moov,
+                    VsdMovie  *movie)
+{
+    g_autoptr (GArray) saved = g_array_copy (movie->tracks);
+    VsdBox ring[VSD_TAIL_MOOFS];
+    guint64 off = after_moov, moof_off = 0, frag;
+    guint seen = 0;
+    VsdBox box;
+
+    if (vsd_bmff_mfra_tail (r, after_moov, &moof_off) &&
+        vsd_bmff_parse_moofs (r, moof_off, movie) > 0 && movie->trafs > 0 && !movie->missing_tfdt)
+        return;
+
+    frag = vsd_bmff_fragment_size (r, after_moov);
+    if (frag == 0 || (r->size - after_moov) / frag > VSD_WALK_FRAGS)
+    {
+        guint64 window = frag == 0 ? VSD_TAIL_MIN : CLAMP (frag * 2 + 65536, VSD_TAIL_MIN, VSD_TAIL_MAX);
+
+        memcpy (movie->tracks->data, saved->data, saved->len * sizeof (VsdTrack));
+        movie->missing_tfdt = FALSE;
+        movie->trafs = 0;
+        seen = vsd_bmff_tail_moofs (r, after_moov, window, ring);
+        for (guint i = seen > VSD_TAIL_MOOFS ? seen - VSD_TAIL_MOOFS : 0; i < seen; i++)
+            vsd_parse_moof (r, &ring[i % VSD_TAIL_MOOFS], movie);
+        if (seen > 0 && !movie->missing_tfdt && vsd_bmff_all_tracks_updated (movie, saved))
+            return;
+    }
+
+    memcpy (movie->tracks->data, saved->data, saved->len * sizeof (VsdTrack));
+    movie->missing_tfdt = FALSE;
+    movie->trafs = 0;
+    seen = 0;
+    for (guint i = 0; i < VSD_MAX_LOOP && vsd_read_box (r, off, r->size, &box); i++)
+    {
+        if (g_cancellable_is_cancelled (r->cancellable) || !vsd_fourcc_printable (box.type))
+            break;
+        if (box.type == BOX_MOOF)
+            ring[seen++ % VSD_TAIL_MOOFS] = box;
+        off += box.size;
+    }
+    for (guint i = seen > VSD_TAIL_MOOFS ? seen - VSD_TAIL_MOOFS : 0; i < seen; i++)
+        vsd_parse_moof (r, &ring[i % VSD_TAIL_MOOFS], movie);
+    if (seen == 0 || (movie->trafs > 0 && !movie->missing_tfdt))
+        return;
+
+    memcpy (movie->tracks->data, saved->data, saved->len * sizeof (VsdTrack));
+    movie->missing_tfdt = FALSE;
+    vsd_bmff_parse_moofs (r, after_moov, movie);
+}
+
+static gboolean
 vsd_probe_bmff (VsdReader *r,
                 VsdMedia  *m)
 {
@@ -771,39 +1008,31 @@ vsd_probe_bmff (VsdReader *r,
     m->format = "ISO BMFF/QuickTime";
     movie.tracks = g_array_new (FALSE, TRUE, sizeof (VsdTrack));
 
-    /* Boxy najwyższego poziomu: ftyp, moov, mdat, (moof, mdat)… */
     while (vsd_read_box (r, off, r->size, &box))
     {
         if (g_cancellable_is_cancelled (r->cancellable) || ++boxes > VSD_MAX_LOOP)
             break;
         if (!vsd_fourcc_printable (box.type))
-            break;  /* śmieci zamiast struktury */
-
+            break;
+        off += box.size;
         if (box.type == BOX_MOOV)
         {
             vsd_parse_moov (r, &box, &movie, m);
             have_moov = TRUE;
-            if (!movie.fragmented)
-                break;  /* zwykły plik: wszystko jest w moov */
+            break;
         }
-        else if (box.type == BOX_MOOF && have_moov && movie.fragmented)
-        {
-            vsd_parse_moof (r, &box, &movie);
-        }
-        off += box.size;
     }
+
+    if (have_moov && movie.fragmented && movie.mehd == 0)
+        vsd_bmff_fragments (r, off, &movie);
 
     if (have_moov)
     {
         if (movie.timescale)
             seconds = (double) movie.duration / movie.timescale;
-
-        /* W plikach fragmentowanych mvhd opisuje tylko część w moov. */
         if (movie.fragmented && movie.timescale && movie.mehd)
             seconds = MAX (seconds, (double) movie.mehd / movie.timescale);
-
-        /* Końce ścieżek: z fragmentów albo (gdy mvhd = 0) z mdhd. */
-        if (movie.fragmented || seconds <= 0.0)
+        if ((movie.fragmented && movie.mehd == 0) || seconds <= 0.0)
         {
             for (guint i = 0; i < movie.tracks->len; i++)
             {
@@ -819,10 +1048,6 @@ vsd_probe_bmff (VsdReader *r,
     return have_moov;
 }
 
-/* ===================================================================== */
-/*  Matroska / WebM: MKV, MKA, WEBM                                       */
-/* ===================================================================== */
-
 enum
 {
     MKV_EBML        = 0x1A45DFA3, MKV_SEGMENT     = 0x18538067,
@@ -835,6 +1060,9 @@ enum
     MKV_CUETIME     = 0xB3,       MKV_TIMESTAMP   = 0xE7,
     MKV_SIMPLEBLOCK = 0xA3,       MKV_BLOCKGROUP  = 0xA0,
     MKV_BLOCK       = 0xA1,       MKV_BLOCKDUR    = 0x9B,
+    MKV_SEEKHEAD    = 0x114D9B74, MKV_SEEK        = 0x4DBB,
+    MKV_SEEKID      = 0x53AB,     MKV_SEEKPOS     = 0x53AC,
+    MKV_CUETRACKPOS = 0xB7,       MKV_CUECLUSTER  = 0xF1,
 };
 
 typedef struct
@@ -855,7 +1083,6 @@ vsd_vint_len (guint8 first)
     return 0;
 }
 
-/* Nagłówek elementu EBML (ID + rozmiar) z bufora. */
 static gboolean
 vsd_ebml_header (const guint8 *p,
                  gsize         avail,
@@ -891,7 +1118,7 @@ vsd_ebml_header (const guint8 *p,
 
     *id = v;
     *size = s;
-    *unknown = ones;  /* same jedynki = rozmiar nieznany (strumień „na żywo”) */
+    *unknown = ones;
     *hdr_len = (gsize) (il + sl);
     return TRUE;
 }
@@ -945,7 +1172,6 @@ vsd_ebml_float (const VsdEbml *el)
     return 0.0;
 }
 
-/* Nagłówek elementu w pliku. */
 static gboolean
 vsd_ebml_read_header (VsdReader *r,
                       guint64    offset,
@@ -1017,27 +1243,141 @@ vsd_mkv_parse_tracks (const guint8 *buf,
 
 static guint64
 vsd_mkv_parse_cues (const guint8 *buf,
-                    gsize         len)
+                    gsize         len,
+                    guint64      *cluster_pos)
 {
-    VsdEbml point, el;
+    VsdEbml point, el, tp;
     gsize pos = 0;
     guint64 last = 0;
 
+    *cluster_pos = 0;
     while (vsd_ebml_next (buf, len, &pos, &point))
     {
+        guint64 t = 0, cp = 0;
+        gboolean have_t = FALSE;
         gsize p2 = 0;
+
         if (point.id != MKV_CUEPOINT)
             continue;
         while (vsd_ebml_next (point.data, point.len, &p2, &el))
         {
             if (el.id == MKV_CUETIME)
-                last = MAX (last, vsd_ebml_uint (el.data, el.len));
+            {
+                t = vsd_ebml_uint (el.data, el.len);
+                have_t = TRUE;
+            }
+            else if (el.id == MKV_CUETRACKPOS)
+            {
+                gsize p3 = 0;
+                while (vsd_ebml_next (el.data, el.len, &p3, &tp))
+                {
+                    if (tp.id == MKV_CUECLUSTER)
+                        cp = MAX (cp, vsd_ebml_uint (tp.data, tp.len));
+                }
+            }
+        }
+        if (have_t && t >= last)
+        {
+            last = t;
+            *cluster_pos = cp;
         }
     }
     return last;
 }
 
-/* Względny czas bloku: [numer ścieżki (vint)][int16 BE]. */
+static void
+vsd_mkv_parse_seekhead (const guint8 *buf,
+                        gsize         len,
+                        guint64      *info,
+                        guint64      *tracks,
+                        guint64      *cues)
+{
+    VsdEbml seek, el;
+    gsize pos = 0;
+
+    while (vsd_ebml_next (buf, len, &pos, &seek))
+    {
+        guint64 id = 0, where = 0;
+        gboolean have_pos = FALSE;
+        gsize p2 = 0;
+
+        if (seek.id != MKV_SEEK)
+            continue;
+        while (vsd_ebml_next (seek.data, seek.len, &p2, &el))
+        {
+            if (el.id == MKV_SEEKID)
+                id = vsd_ebml_uint (el.data, el.len);
+            else if (el.id == MKV_SEEKPOS)
+            {
+                where = vsd_ebml_uint (el.data, el.len);
+                have_pos = TRUE;
+            }
+        }
+        if (!have_pos)
+            continue;
+        if (id == MKV_INFO && *info == G_MAXUINT64)
+            *info = where;
+        else if (id == MKV_TRACKS && *tracks == G_MAXUINT64)
+            *tracks = where;
+        else if (id == MKV_CUES && *cues == G_MAXUINT64)
+            *cues = where;
+    }
+}
+
+static guint8 *
+vsd_mkv_read_element (VsdReader *r,
+                      guint64    off,
+                      guint64    seg_end,
+                      guint32    want,
+                      gsize     *len)
+{
+    guint32 id;
+    guint64 size;
+    gboolean unknown;
+    gsize hl;
+
+    if (off >= seg_end || !vsd_ebml_read_header (r, off, &id, &size, &unknown, &hl) ||
+        id != want || unknown || off + hl > seg_end)
+        return NULL;
+    size = MIN (size, seg_end - off - hl);
+    *len = (gsize) size;
+    return vsd_read_alloc (r, off + hl, size);
+}
+
+static gboolean
+vsd_mkv_last_cluster (VsdReader *r,
+                      guint64    off,
+                      guint64    seg_end,
+                      guint64   *start,
+                      guint64   *end)
+{
+    gboolean found = FALSE;
+
+    for (guint loops = 0; off < seg_end && loops < VSD_MAX_LOOP; loops++)
+    {
+        guint32 id;
+        guint64 size, data;
+        gboolean unknown;
+        gsize hl;
+
+        if (g_cancellable_is_cancelled (r->cancellable) ||
+            !vsd_ebml_read_header (r, off, &id, &size, &unknown, &hl))
+            break;
+        data = off + hl;
+        if (data > seg_end || unknown)
+            break;
+        size = MIN (size, seg_end - data);
+        if (id == MKV_CLUSTER)
+        {
+            *start = data;
+            *end = data + size;
+            found = TRUE;
+        }
+        off = data + size;
+    }
+    return found;
+}
+
 static gint64
 vsd_mkv_block_time (VsdReader *r,
                     guint64    data_offset,
@@ -1055,7 +1395,6 @@ vsd_mkv_block_time (VsdReader *r,
     return (gint16) rd_be16 (b + tl);
 }
 
-/* Koniec ostatniego klastra: jego Timestamp + najpóźniejszy blok. */
 static guint64
 vsd_mkv_cluster_end (VsdReader *r,
                      guint64    start,
@@ -1129,15 +1468,16 @@ vsd_probe_matroska (VsdReader *r,
                     VsdMedia  *m)
 {
     guint32 id;
-    guint64 size, off = 0, seg_start = 0, seg_end = 0, scale = 1000000, max_cue = 0;
-    guint64 last_cluster = 0, last_cluster_end = 0;
-    gboolean unknown, found = FALSE, have_info = FALSE, have_tracks = FALSE, have_cluster = FALSE;
+    guint64 size, off = 0, seg_start = 0, seg_end = 0, scale = 1000000, max_cue = 0, cue_cluster = 0;
+    guint64 seek_info = G_MAXUINT64, seek_tracks = G_MAXUINT64, seek_cues = G_MAXUINT64;
+    guint64 first_cluster = 0, last_cluster = 0, last_cluster_end = 0;
+    gboolean unknown, found = FALSE, have_info = FALSE, have_tracks = FALSE, have_cues = FALSE;
+    gboolean have_seekhead = FALSE, have_cluster = FALSE, walked_all = FALSE;
     double duration = 0.0;
-    gsize hl;
+    gsize hl, len;
 
     m->format = "Matroska/WebM";
 
-    /* Najwyższy poziom: nagłówek EBML, potem Segment. */
     for (int i = 0; i < 16 && vsd_ebml_read_header (r, off, &id, &size, &unknown, &hl); i++)
     {
         if (id == MKV_SEGMENT)
@@ -1162,19 +1502,22 @@ vsd_probe_matroska (VsdReader *r,
         if (g_cancellable_is_cancelled (r->cancellable))
             break;
         if (!vsd_ebml_read_header (r, off, &id, &size, &unknown, &hl))
+        {
+            walked_all = TRUE;
             break;
+        }
         data = off + hl;
         if (data > seg_end)
             break;
         if (unknown)
         {
             if (id == MKV_CLUSTER)
-                break;  /* klastra o nieznanym rozmiarze nie da się przeskoczyć */
+                break;
             size = seg_end - data;
         }
-        size = MIN (size, seg_end - data);  /* ucięty plik */
+        size = MIN (size, seg_end - data);
 
-        if (id == MKV_INFO || id == MKV_TRACKS || (id == MKV_CUES && duration <= 0.0))
+        if (id == MKV_INFO || id == MKV_TRACKS || id == MKV_CUES || (id == MKV_SEEKHEAD && !have_seekhead))
         {
             g_autofree guint8 *buf = vsd_read_alloc (r, data, size);
 
@@ -1188,32 +1531,86 @@ vsd_probe_matroska (VsdReader *r,
                 vsd_mkv_parse_tracks (buf, (gsize) size, m);
                 have_tracks = TRUE;
             }
+            else if (buf != NULL && id == MKV_CUES)
+            {
+                guint64 cp, cue = vsd_mkv_parse_cues (buf, (gsize) size, &cp);
+                if (cue >= max_cue)
+                {
+                    max_cue = cue;
+                    cue_cluster = cp;
+                }
+                have_cues = TRUE;
+            }
             else if (buf != NULL)
             {
-                guint64 cue = vsd_mkv_parse_cues (buf, (gsize) size);
-                max_cue = MAX (max_cue, cue);
+                vsd_mkv_parse_seekhead (buf, (gsize) size, &seek_info, &seek_tracks, &seek_cues);
+                have_seekhead = TRUE;
             }
         }
         else if (id == MKV_CLUSTER)
         {
+            if (!have_cluster)
+                first_cluster = off;
             have_cluster = TRUE;
             last_cluster = data;
             last_cluster_end = data + size;
+
+            if ((have_info || seek_info != G_MAXUINT64) && (have_tracks || seek_tracks != G_MAXUINT64))
+                break;
         }
 
         if (have_info && have_tracks && duration > 0.0)
-            break;  /* zwykły przypadek: Info i Tracks są przed klastrami */
+            break;
         off = data + size;
+        if (off >= seg_end)
+            walked_all = TRUE;
+    }
+
+    if (!have_info && seek_info != G_MAXUINT64)
+    {
+        g_autofree guint8 *buf = vsd_mkv_read_element (r, seg_start + seek_info, seg_end, MKV_INFO, &len);
+        if (buf != NULL)
+        {
+            vsd_mkv_parse_info (buf, len, &scale, &duration);
+            have_info = TRUE;
+        }
+    }
+    if (!have_tracks && seek_tracks != G_MAXUINT64)
+    {
+        g_autofree guint8 *buf = vsd_mkv_read_element (r, seg_start + seek_tracks, seg_end, MKV_TRACKS, &len);
+        if (buf != NULL)
+        {
+            vsd_mkv_parse_tracks (buf, len, m);
+            have_tracks = TRUE;
+        }
     }
 
     if (scale == 0)
         scale = 1000000;
     m->seconds = duration * (double) scale / 1e9;
 
-    /* Brak Duration (np. nagranie przerwane): koniec ostatniego klastra lub ostatni Cue. */
     if (m->seconds <= 0.0)
     {
-        guint64 end_ts = max_cue;
+        guint64 end_ts, from = 0;
+
+        if (!have_cues && seek_cues != G_MAXUINT64)
+        {
+            g_autofree guint8 *buf = vsd_mkv_read_element (r, seg_start + seek_cues, seg_end, MKV_CUES, &len);
+            if (buf != NULL)
+            {
+                max_cue = vsd_mkv_parse_cues (buf, len, &cue_cluster);
+                have_cues = TRUE;
+            }
+        }
+        if (!walked_all && have_cluster)
+        {
+            from = first_cluster;
+            if (have_cues && cue_cluster > 0 && seg_start + cue_cluster > first_cluster)
+                from = seg_start + cue_cluster;
+            if (!vsd_mkv_last_cluster (r, from, seg_end, &last_cluster, &last_cluster_end) && from != first_cluster)
+                vsd_mkv_last_cluster (r, first_cluster, seg_end, &last_cluster, &last_cluster_end);
+        }
+        end_ts = max_cue;
         if (have_cluster)
         {
             guint64 cluster_end = vsd_mkv_cluster_end (r, last_cluster, last_cluster_end);
@@ -1223,10 +1620,6 @@ vsd_probe_matroska (VsdReader *r,
     }
     return have_info || have_tracks;
 }
-
-/* ===================================================================== */
-/*  RIFF: AVI i WAV (RIFF/RF64/BW64)                                      */
-/* ===================================================================== */
 
 enum
 {
@@ -1242,7 +1635,6 @@ enum
     RIFF_DS64 = FOURCC ('d', 's', '6', '4'),
 };
 
-/* Kolejny podrozdział RIFF z bufora. ID porównujemy jako big-endian FOURCC. */
 static gboolean
 vsd_riff_next (const guint8  *buf,
                gsize          len,
@@ -1258,7 +1650,7 @@ vsd_riff_next (const guint8  *buf,
     *id = rd_be32 (buf + *pos);
     size = rd_le32 (buf + *pos + 4);
     if (size > len - *pos - 8)
-        size = (guint32) (len - *pos - 8);  /* ucięty */
+        size = (guint32) (len - *pos - 8);
     *data = buf + *pos + 8;
     *dlen = size;
     *pos += 8 + (gsize) size + (size & 1);
@@ -1305,7 +1697,6 @@ vsd_avi_parse_strl (const guint8 *buf,
         }
         else if (id == RIFF_STRF && first_video && dlen >= 12)
         {
-            /* BITMAPINFOHEADER: biWidth, biHeight (ujemna = obraz od góry) */
             gint32 w = (gint32) rd_le32 (data + 4), h = (gint32) rd_le32 (data + 8);
             avi->v_width = (guint32) ABS (w);
             avi->v_height = (guint32) ABS (h);
@@ -1334,7 +1725,7 @@ vsd_avi_parse_list (const guint8 *buf,
         }
         else if (id == RIFF_DMLH && dlen >= 4)
         {
-            avi->dmlh_frames = rd_le32 (data);  /* OpenDML: wszystkie klatki (> 1 GiB) */
+            avi->dmlh_frames = rd_le32 (data);
         }
         else if (id == RIFF_LIST && dlen >= 4)
         {
@@ -1434,7 +1825,7 @@ vsd_probe_wav (VsdReader    *r,
             sample_rate = rd_le32 (p + 4);
             avg_bytes = rd_le32 (p + 8);
             block_align = rd_le16 (p + 12);
-            if (tag == 0xFFFE && size >= 40)  /* WAVE_FORMAT_EXTENSIBLE: kod w SubFormat */
+            if (tag == 0xFFFE && size >= 40)
                 tag = rd_le16 (p + 24);
             have_fmt = TRUE;
         }
@@ -1450,7 +1841,7 @@ vsd_probe_wav (VsdReader    *r,
             if (rf64 && size == G_MAXUINT32)
                 data_size = ds64_data;
             if (data_size == 0 || data_size > r->size - data_offset)
-                data_size = r->size - data_offset;  /* nagrywany strumieniowo / ucięty */
+                data_size = r->size - data_offset;
             chunk = data_size;
             have_data = TRUE;
             if (have_fmt)
@@ -1462,7 +1853,6 @@ vsd_probe_wav (VsdReader    *r,
     if (!have_fmt || !have_data)
         return have_fmt;
 
-    /* PCM, float, A-law, µ-law: stała liczba bajtów na próbkę. */
     if ((tag == 1 || tag == 3 || tag == 6 || tag == 7) && block_align > 0 && sample_rate > 0)
         m->seconds = (double) (data_size / block_align) / sample_rate;
     else if (have_fact && fact > 0 && sample_rate > 0)
@@ -1472,21 +1862,17 @@ vsd_probe_wav (VsdReader    *r,
     return TRUE;
 }
 
-/* ===================================================================== */
-/*  Ogg: Vorbis, Opus, FLAC, Speex, Theora                                */
-/* ===================================================================== */
-
 enum { OGG_UNKNOWN, OGG_VORBIS, OGG_OPUS, OGG_FLAC, OGG_SPEEX, OGG_THEORA };
 
 typedef struct
 {
     guint32  serial;
     int      codec;
-    guint32  rate;          /* jednostka granule: próbki/s (Opus: zawsze 48 kHz) */
+    guint32  rate;
     guint32  preskip;
-    guint32  frn, frd;      /* Theora: klatki/s = frn/frd */
-    guint8   shift;         /* Theora: KFGSHIFT */
-    gboolean theora_old;    /* < 3.2.1: numeracja klatek od 0 */
+    guint32  frn, frd;
+    guint8   shift;
+    gboolean theora_old;
     guint64  granule;
     gboolean have_granule;
 } VsdOggStream;
@@ -1521,18 +1907,18 @@ vsd_ogg_crc_init (void)
     }
 }
 
-/* CRC strony z polem sumy (bajty 22–25) liczonym jako zera. */
 static guint32
 vsd_ogg_crc (const guint8 *p,
              gsize         len)
 {
     guint32 crc = 0;
 
-    for (gsize i = 0; i < len; i++)
-    {
-        guint8 b = (i >= 22 && i < 26) ? 0 : p[i];
-        crc = (crc << 8) ^ vsd_ogg_crc_table[((crc >> 24) & 0xff) ^ b];
-    }
+    for (gsize i = 0; i < 22; i++)
+        crc = (crc << 8) ^ vsd_ogg_crc_table[((crc >> 24) & 0xff) ^ p[i]];
+    for (gsize i = 22; i < 26; i++)
+        crc = (crc << 8) ^ vsd_ogg_crc_table[(crc >> 24) & 0xff];
+    for (gsize i = 26; i < len; i++)
+        crc = (crc << 8) ^ vsd_ogg_crc_table[((crc >> 24) & 0xff) ^ p[i]];
     return crc;
 }
 
@@ -1586,7 +1972,7 @@ vsd_ogg_identify (VsdOggStream *s,
     }
     else if (n >= 13 + 4 + 18 && b[0] == 0x7f && memcmp (b + 1, "FLAC", 4) == 0)
     {
-        const guint8 *si = b + 13 + 4;  /* STREAMINFO po nagłówku mapowania */
+        const guint8 *si = b + 13 + 4;
         s->codec = OGG_FLAC;
         s->rate = ((guint32) si[10] << 12) | ((guint32) si[11] << 4) | (si[12] >> 4);
     }
@@ -1604,7 +1990,7 @@ vsd_ogg_identify (VsdOggStream *s,
         s->frn = rd_be32 (b + 22);
         s->frd = rd_be32 (b + 26);
         s->shift = (guint8) (((b[40] & 0x03) << 3) | (b[41] >> 5));
-        vsd_media_add_video (m, rd_be24 (b + 14), rd_be24 (b + 17));  /* PICW × PICH */
+        vsd_media_add_video (m, rd_be24 (b + 14), rd_be24 (b + 17));
     }
 }
 
@@ -1633,7 +2019,6 @@ vsd_ogg_stream_seconds (const VsdOggStream *s)
     }
 }
 
-/* Ostatnie granule każdego strumienia z końcówki pliku. */
 static gboolean
 vsd_ogg_scan_tail (VsdReader    *r,
                    gsize         tail,
@@ -1643,34 +2028,43 @@ vsd_ogg_scan_tail (VsdReader    *r,
     guint64 start = r->size > tail ? r->size - tail : 0;
     gsize len = (gsize) (r->size - start);
     g_autofree guint8 *buf = vsd_read_alloc (r, start, len);
+    g_autoptr (GArray) hits = NULL;
     gboolean any = FALSE;
+    int pending = count;
     gsize pos = 0;
 
     if (buf == NULL)
         return FALSE;
 
+    hits = g_array_sized_new (FALSE, FALSE, sizeof (gsize), 64);
     while (pos + 27 <= len)
     {
         guint8 *hit = memmem (buf + pos, len - pos, "OggS", 4);
-        VsdOggPage pg;
 
         if (hit == NULL)
             break;
         pos = (gsize) (hit - buf);
-        if (!vsd_ogg_page (buf, len, pos, TRUE, &pg))
-        {
-            pos++;
+        g_array_append_val (hits, pos);
+        pos++;
+    }
+
+    for (guint h = hits->len; h > 0 && pending > 0; h--)
+    {
+        gsize at = g_array_index (hits, gsize, h - 1);
+        guint32 serial;
+        VsdOggPage pg;
+        int i;
+
+        if (len - at < 27 || rd_le64 (buf + at + 6) == G_MAXUINT64)
             continue;
-        }
-        for (int i = 0; i < count; i++)
-        {
-            if (streams[i].serial == pg.serial && pg.granule != G_MAXUINT64)
-            {
-                streams[i].granule = pg.granule;
-                streams[i].have_granule = any = TRUE;
-            }
-        }
-        pos += pg.page_len;
+        serial = rd_le32 (buf + at + 14);
+        for (i = 0; i < count && (streams[i].serial != serial || streams[i].have_granule); i++)
+            ;
+        if (i == count || !vsd_ogg_page (buf, len, at, TRUE, &pg))
+            continue;
+        streams[i].granule = pg.granule;
+        streams[i].have_granule = any = TRUE;
+        pending--;
     }
     return any;
 }
@@ -1681,7 +2075,7 @@ vsd_probe_ogg (VsdReader *r,
 {
     VsdOggStream streams[16] = { { 0 } };
     int count = 0;
-    gsize len = (gsize) MIN (r->size, (guint64) 256 * 1024), pos = 0;
+    gsize len = (gsize) MIN (r->size, (guint64) 16 * 1024), pos = 0;
     g_autofree guint8 *head = vsd_read_alloc (r, 0, len);
     VsdOggPage pg;
 
@@ -1690,7 +2084,6 @@ vsd_probe_ogg (VsdReader *r,
         return FALSE;
     vsd_ogg_crc_init ();
 
-    /* Strony BOS (początek strumienia) są na początku pliku, przed danymi. */
     while (count < (int) G_N_ELEMENTS (streams) && vsd_ogg_page (head, len, pos, FALSE, &pg))
     {
         if (!(pg.type & 0x02))
@@ -1703,17 +2096,13 @@ vsd_probe_ogg (VsdReader *r,
     if (count == 0)
         return FALSE;
 
-    if (!vsd_ogg_scan_tail (r, 128 * 1024, streams, count))
+    if (!vsd_ogg_scan_tail (r, 72 * 1024, streams, count))
         vsd_ogg_scan_tail (r, 1024 * 1024, streams, count);
 
     for (int i = 0; i < count; i++)
         m->seconds = MAX (m->seconds, vsd_ogg_stream_seconds (&streams[i]));
     return TRUE;
 }
-
-/* ===================================================================== */
-/*  FLAC (natywny)                                                        */
-/* ===================================================================== */
 
 static gboolean
 vsd_probe_flac (VsdReader *r,
@@ -1725,7 +2114,7 @@ vsd_probe_flac (VsdReader *r,
     guint64 samples;
 
     m->format = "FLAC";
-    /* "fLaC", nagłówek bloku (typ 0 = STREAMINFO), STREAMINFO */
+
     if (!vsd_read_at (r, start, p, sizeof p) || (p[4] & 0x7f) != 0 || rd_be24 (p + 5) < 18)
         return FALSE;
     rate = ((guint32) p[18] << 12) | ((guint32) p[19] << 4) | (p[20] >> 4);
@@ -1734,10 +2123,6 @@ vsd_probe_flac (VsdReader *r,
         m->seconds = (double) samples / rate;
     return TRUE;
 }
-
-/* ===================================================================== */
-/*  ASF: WMA, WMV                                                         */
-/* ===================================================================== */
 
 static const guint8 ASF_HEADER[16] = {
     0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C };
@@ -1775,10 +2160,10 @@ vsd_probe_asf (VsdReader *r,
         if (memcmp (o, ASF_FILE_PROPERTIES, 16) == 0 && size >= 24 + 80 &&
             vsd_read_at (r, off + 24, p, 68))
         {
-            guint64 play = rd_le64 (p + 40);    /* 100 ns */
-            guint64 preroll = rd_le64 (p + 56); /* ms */
+            guint64 play = rd_le64 (p + 40);
+            guint64 preroll = rd_le64 (p + 56);
 
-            if (!(rd_le32 (p + 64) & 0x01))     /* flaga „broadcast”: czasy nieważne */
+            if (!(rd_le32 (p + 64) & 0x01))
             {
                 double s = (double) play / 1e7 - (double) preroll / 1000.0;
                 m->seconds = s > 0.0 ? s : (double) play / 1e7;
@@ -1788,16 +2173,12 @@ vsd_probe_asf (VsdReader *r,
         else if (memcmp (o, ASF_STREAM_PROPERTIES, 16) == 0 && size >= 24 + 62 &&
                  vsd_read_at (r, off + 24, p, 62) && memcmp (p, ASF_VIDEO_MEDIA, 16) == 0)
         {
-            vsd_media_add_video (m, rd_le32 (p + 54), rd_le32 (p + 58));  /* Encoded Image W × H */
+            vsd_media_add_video (m, rd_le32 (p + 54), rd_le32 (p + 58));
         }
         off += size;
     }
     return have_props;
 }
-
-/* ===================================================================== */
-/*  MPEG audio (MP3/MP2) i AAC ADTS                                       */
-/* ===================================================================== */
 
 typedef struct
 {
@@ -1824,7 +2205,7 @@ vsd_mpa_parse (const guint8 *p,
 
     if ((h & 0xFFE00000u) != 0xFFE00000u)
         return FALSE;
-    version = (h >> 19) & 3;  /* 0: MPEG-2.5, 2: MPEG-2, 3: MPEG-1 */
+    version = (h >> 19) & 3;
     layer = 4 - ((h >> 17) & 3);
     bri = (h >> 12) & 15;
     sri = (h >> 10) & 3;
@@ -1866,7 +2247,6 @@ vsd_adts_parse (const guint8 *p,
     return *frame_len >= 7;
 }
 
-/* Bajty na końcu pliku zajęte przez tagi (ID3v1). */
 static guint64
 vsd_audio_end (VsdReader *r)
 {
@@ -1876,20 +2256,75 @@ vsd_audio_end (VsdReader *r)
     return r->size;
 }
 
-static gboolean
-vsd_probe_mpeg_audio (VsdReader *r,
-                      guint64    start,
-                      VsdMedia  *m)
+#define VSD_MPA_WINDOW (64u * 1024u)
+#define VSD_MPA_JUNK   (1024u * 1024u)
+#define VSD_ADTS_COUNT (1024u * 1024u)
+#define VSD_ADTS_CHUNK (192u * 1024u)
+#define VSD_ADTS_PARTS 4u
+
+static gsize
+vsd_adts_count (const guint8 *b,
+                gsize         len,
+                guint32       rate,
+                gboolean      resync,
+                guint64      *bytes,
+                guint64      *samples)
 {
-    gsize len = (gsize) MIN (r->size - MIN (start, r->size), (guint64) 1024 * 1024);
-    g_autofree guint8 *buf = vsd_read_alloc (r, start, len);
-    guint64 audio_end = vsd_audio_end (r);
+    guint32 r2, l2, s2;
+    gsize p = 0;
+
+    while (resync && p + 7 <= len)
+    {
+        guint32 ra, la, sa, rb, lb, sb;
+
+        if (b[p] == 0xFF && vsd_adts_parse (b + p, &ra, &la, &sa) && ra == rate && p + la + 7 <= len &&
+            vsd_adts_parse (b + p + la, &rb, &lb, &sb) && rb == rate && p + la + lb + 7 <= len &&
+            vsd_adts_parse (b + p + la + lb, &r2, &l2, &s2) && r2 == rate)
+            break;
+        p++;
+    }
+    while (p + 7 <= len && vsd_adts_parse (b + p, &r2, &l2, &s2) && r2 == rate && p + l2 <= len)
+    {
+        *bytes += l2;
+        *samples += s2;
+        p += l2;
+    }
+    return p;
+}
+
+static gboolean
+vsd_adts_sample (VsdReader *r,
+                 guint64    off,
+                 guint32    rate,
+                 guint64   *bytes,
+                 guint64   *samples)
+{
+    gsize len = (gsize) MIN ((guint64) VSD_ADTS_CHUNK, r->size - MIN (off, r->size));
+    g_autofree guint8 *buf = len > 0 ? vsd_read_alloc (r, off, len) : NULL;
 
     if (buf == NULL)
         return FALSE;
+    vsd_adts_count (buf, len, rate, TRUE, bytes, samples);
+    return TRUE;
+}
 
-    /* Pierwsza ramka potwierdzona przez dwie kolejne (mniej fałszywych trafień). */
-    for (gsize pos = 0; pos + 10 <= len && pos < 128 * 1024; pos++)
+static int
+vsd_mpeg_audio_window (VsdReader *r,
+                       guint64    start,
+                       gsize      want,
+                       gsize      search,
+                       guint64    audio_end,
+                       VsdMedia  *m)
+{
+    gsize len = (gsize) MIN (r->size - MIN (start, r->size), (guint64) want);
+    g_autofree guint8 *buf = vsd_read_alloc (r, start, len);
+
+    if (buf == NULL)
+        return -1;
+    if (len < want)
+        search = len;
+
+    for (gsize pos = 0; pos + 10 <= len && pos < search; pos++)
     {
         guint32 rate, flen, spf;
         VsdMpa f, g, h;
@@ -1900,27 +2335,53 @@ vsd_probe_mpeg_audio (VsdReader *r,
         if (vsd_adts_parse (buf + pos, &rate, &flen, &spf))
         {
             guint32 r2, l2, s2;
-            guint64 frames = 0, bytes = 0, samples = 0;
-            gsize p = pos;
+            guint64 bytes = 0, samples = 0, first = start + pos;
+            guint64 span = audio_end > first ? audio_end - first : r->size - first;
+            gsize clen = (gsize) MIN (span, (guint64) VSD_ADTS_COUNT);
+            g_autofree guint8 *cbuf = NULL;
+            const guint8 *cb;
 
-            if (p + flen + 7 <= len && !(vsd_adts_parse (buf + p + flen, &r2, &l2, &s2) && r2 == rate))
+            if (pos + flen + 7 <= len && !(vsd_adts_parse (buf + pos + flen, &r2, &l2, &s2) && r2 == rate))
                 continue;
 
             m->format = "AAC ADTS";
-            while (p + 7 <= len && vsd_adts_parse (buf + p, &r2, &l2, &s2) && r2 == rate && p + l2 <= len)
+            if (span > VSD_ADTS_COUNT)
             {
-                frames++;
-                bytes += l2;
-                samples += s2;
-                p += l2;
+                for (guint k = 0; k < VSD_ADTS_PARTS; k++)
+                {
+                    guint64 center = first + span * (2 * k + 1) / (2 * VSD_ADTS_PARTS);
+
+                    vsd_adts_sample (r, center > first + VSD_ADTS_CHUNK / 2 ? center - VSD_ADTS_CHUNK / 2 : first,
+                                     rate, &bytes, &samples);
+                }
+                if (bytes > 0)
+                {
+                    m->seconds = (double) span * ((double) samples / (double) bytes) / rate;
+                    return 1;
+                }
             }
-            if (frames == 0 || bytes == 0)
-                return FALSE;
-            if (start + p >= audio_end || start + len >= r->size)
-                m->seconds = (double) samples / rate;  /* cały plik przeliczony */
-            else                                       /* szacunek ze średniej ramki */
-                m->seconds = (double) (audio_end - start - pos) * ((double) samples / (double) bytes) / rate;
-            return TRUE;
+
+            if (pos + clen <= len)
+            {
+                cb = buf + pos;
+            }
+            else
+            {
+                gsize have = len - pos;
+
+                cbuf = g_malloc (clen);
+                memcpy (cbuf, buf + pos, have);
+                if (!vsd_read_at (r, first + have, cbuf + have, clen - have))
+                    return -1;
+                cb = cbuf;
+            }
+
+            vsd_adts_count (cb, clen, rate, FALSE, &bytes, &samples);
+            if (bytes == 0)
+                return -1;
+            m->seconds = span > VSD_ADTS_COUNT ? (double) span * ((double) samples / (double) bytes) / rate
+                                               : (double) samples / rate;
+            return 1;
         }
 
         if (vsd_mpa_parse (buf + pos, &f) &&
@@ -1934,27 +2395,34 @@ vsd_probe_mpeg_audio (VsdReader *r,
             const guint8 *v = buf + pos + 36;
 
             m->format = "MPEG audio";
-            /* Xing/Info (LAME) lub VBRI (Fraunhofer): dokładna liczba ramek. */
             if (pos + f.xing_offset + 12 <= len && (memcmp (x, "Xing", 4) == 0 || memcmp (x, "Info", 4) == 0) &&
                 (rd_be32 (x + 4) & 0x01))
-            {
                 m->seconds = (double) rd_be32 (x + 8) * f.samples / f.sample_rate;
-            }
             else if (pos + 36 + 18 <= len && memcmp (v, "VBRI", 4) == 0)
-            {
                 m->seconds = (double) rd_be32 (v + 14) * f.samples / f.sample_rate;
-            }
             else if (f.bitrate > 0 && audio_end > start + pos)
-            {
-                m->seconds = (double) (audio_end - start - pos) * 8.0 / f.bitrate;  /* CBR */
-            }
-            return TRUE;
+                m->seconds = (double) (audio_end - start - pos) * 8.0 / f.bitrate;
+            return 1;
         }
     }
-    return FALSE;
+    return 0;
 }
 
-/* Pomija tagi ID3v2 na początku pliku (MP3, AAC, czasem FLAC). */
+static gboolean
+vsd_probe_mpeg_audio (VsdReader *r,
+                      guint64    start,
+                      guint      hints,
+                      VsdMedia  *m)
+{
+    guint64 audio_end = vsd_audio_end (r);
+    int res = vsd_mpeg_audio_window (r, start, VSD_MPA_WINDOW, VSD_MPA_WINDOW - 8192, audio_end, m);
+
+    if (res == 0 && (hints & VSD_HINT_MPEG_AUDIO || start > 0) &&
+        r->size - MIN (start, r->size) > VSD_MPA_WINDOW)
+        res = vsd_mpeg_audio_window (r, start, VSD_MPA_JUNK, 128 * 1024, audio_end, m);
+    return res > 0;
+}
+
 static guint64
 vsd_skip_id3v2 (VsdReader *r)
 {
@@ -1970,11 +2438,42 @@ vsd_skip_id3v2 (VsdReader *r)
     return off;
 }
 
-/* ===================================================================== */
-/*  Rozpoznanie formatu po zawartości                                     */
-/* ===================================================================== */
+static gboolean
+vsd_probe_reader (VsdReader *r,
+                  guint      hints,
+                  VsdMedia  *m)
+{
+    guint8 head[64];
+    gsize n;
+    guint64 start;
 
-/* Uruchamiane w wątku roboczym. */
+    n = vsd_read_some (r, 0, head, sizeof head);
+    if (n < 16)
+        return FALSE;
+
+    if (vsd_bmff_known_box (rd_be32 (head + 4)))
+        return vsd_probe_bmff (r, m);
+    if (rd_be32 (head) == MKV_EBML)
+        return vsd_probe_matroska (r, m);
+    if ((rd_be32 (head) == RIFF_RIFF || rd_be32 (head) == RIFF_RF64 || rd_be32 (head) == RIFF_BW64) &&
+        rd_be32 (head + 8) == RIFF_WAVE)
+        return vsd_probe_wav (r, head, m);
+    if (rd_be32 (head) == RIFF_RIFF && rd_be32 (head + 8) == RIFF_AVI)
+        return vsd_probe_avi (r, m);
+    if (memcmp (head, "OggS", 4) == 0)
+        return vsd_probe_ogg (r, m);
+    if (memcmp (head, ASF_HEADER, 16) == 0)
+        return vsd_probe_asf (r, m);
+
+    start = vsd_skip_id3v2 (r);
+    n = vsd_read_some (r, start, head, 4);
+    if (n == 4 && memcmp (head, "fLaC", 4) == 0)
+        return vsd_probe_flac (r, start, m);
+    if ((n >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0) || start > 0 || (hints & VSD_HINT_MPEG_AUDIO))
+        return vsd_probe_mpeg_audio (r, start, hints, m);
+    return FALSE;
+}
+
 static gboolean
 vsd_probe (GFile        *location,
            guint         hints,
@@ -1982,84 +2481,83 @@ vsd_probe (GFile        *location,
            VsdMedia     *m)
 {
     g_autoptr (GFileInputStream) stream = NULL;
-    g_autoptr (GFileInfo) info = NULL;
-    VsdReader r = { 0 };
-    guint8 head[64];
-    gsize n;
-    guint64 start;
+    VsdReader *r = g_new0 (VsdReader, 1);
+    const char *path = g_file_peek_path (location);
+    gboolean ok = FALSE;
 
     memset (m, 0, sizeof *m);
-    stream = g_file_read (location, cancellable, NULL);
-    if (stream == NULL || !g_seekable_can_seek (G_SEEKABLE (stream)))
-        return FALSE;
+    r->fd = -1;
+    r->cancellable = cancellable;
 
-    r.in = G_INPUT_STREAM (stream);
-    r.cancellable = cancellable;
-    info = g_file_input_stream_query_info (stream, G_FILE_ATTRIBUTE_STANDARD_SIZE, cancellable, NULL);
-    if (info != NULL && g_file_info_has_attribute (info, G_FILE_ATTRIBUTE_STANDARD_SIZE))
-        r.size = (guint64) g_file_info_get_size (info);
-    else if (g_seekable_seek (G_SEEKABLE (stream), 0, G_SEEK_END, cancellable, NULL))
-        r.size = (guint64) g_seekable_tell (G_SEEKABLE (stream));
+    if (path != NULL)
+    {
+        struct stat st;
 
-    n = vsd_read_some (&r, 0, head, sizeof head);
-    if (n < 16)
-        return FALSE;
+        r->fd = open (path, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+        if (r->fd >= 0 && (fstat (r->fd, &st) != 0 || !S_ISREG (st.st_mode)))
+            goto out;
+        if (r->fd >= 0)
+        {
+            r->size = (guint64) st.st_size;
+#ifdef POSIX_FADV_RANDOM
+            posix_fadvise (r->fd, 0, 0, POSIX_FADV_RANDOM);
+#endif
+        }
+    }
+    if (r->fd < 0)
+    {
+        g_autoptr (GFileInfo) info = NULL;
 
-    if (vsd_bmff_known_box (rd_be32 (head + 4)))
-        return vsd_probe_bmff (&r, m);
-    if (rd_be32 (head) == MKV_EBML)
-        return vsd_probe_matroska (&r, m);
-    if ((rd_be32 (head) == RIFF_RIFF || rd_be32 (head) == RIFF_RF64 || rd_be32 (head) == RIFF_BW64) &&
-        rd_be32 (head + 8) == RIFF_WAVE)
-        return vsd_probe_wav (&r, head, m);
-    if (rd_be32 (head) == RIFF_RIFF && rd_be32 (head + 8) == RIFF_AVI)
-        return vsd_probe_avi (&r, m);
-    if (memcmp (head, "OggS", 4) == 0)
-        return vsd_probe_ogg (&r, m);
-    if (memcmp (head, ASF_HEADER, 16) == 0)
-        return vsd_probe_asf (&r, m);
+        stream = g_file_read (location, cancellable, NULL);
+        if (stream == NULL || !g_seekable_can_seek (G_SEEKABLE (stream)))
+            goto out;
+        r->in = G_INPUT_STREAM (stream);
+        info = g_file_input_stream_query_info (stream, G_FILE_ATTRIBUTE_STANDARD_SIZE, cancellable, NULL);
+        if (info != NULL && g_file_info_has_attribute (info, G_FILE_ATTRIBUTE_STANDARD_SIZE))
+            r->size = (guint64) g_file_info_get_size (info);
+        else if (g_seekable_seek (G_SEEKABLE (stream), 0, G_SEEK_END, cancellable, NULL))
+            r->size = (guint64) g_seekable_tell (G_SEEKABLE (stream));
+    }
 
-    start = vsd_skip_id3v2 (&r);
-    n = vsd_read_some (&r, start, head, 4);
-    if (n == 4 && memcmp (head, "fLaC", 4) == 0)
-        return vsd_probe_flac (&r, start, m);
-    if ((n >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0) || start > 0 || (hints & VSD_HINT_MPEG_AUDIO))
-        return vsd_probe_mpeg_audio (&r, start, m);
-    return FALSE;
+    ok = vsd_probe_reader (r, hints, m);
+
+out:
+    if (r->fd >= 0)
+        close (r->fd);
+    g_free (r);
+    return ok;
 }
 
-/* ===================================================================== */
-/*  Formatowanie (stała szerokość, bo Nautilus sortuje przez strcmp)      */
-/* ===================================================================== */
+#ifndef VSD_THUMBNAILER
+#define VSD_CELL 32
 
-/* "    3:25", "   42:07", " 1:02:05" — dopełnione spacjami do 8 znaków. */
-static char *
-vsd_format_duration (double seconds)
+static void
+vsd_format_duration (double seconds,
+                     char   out[VSD_CELL])
 {
-    char tmp[32];
+    char tmp[VSD_CELL];
     guint64 s;
 
+    out[0] = '\0';
     if (seconds <= 0.0 || seconds > VSD_MAX_SECONDS)
-        return g_strdup ("");
+        return;
     s = (guint64) (seconds + 0.5);
     if (s >= 3600)
         g_snprintf (tmp, sizeof tmp, "%" G_GUINT64_FORMAT ":%02u:%02u",
                     s / 3600, (guint) (s / 60 % 60), (guint) (s % 60));
     else
         g_snprintf (tmp, sizeof tmp, "%u:%02u", (guint) (s / 60), (guint) (s % 60));
-    return g_strdup_printf ("%8s", tmp);
+    g_snprintf (out, VSD_CELL, "%8s", tmp);
 }
 
-/* "  720", " 1920" — dopełnione spacjami do 5 znaków. */
-static char *
-vsd_format_pixels (guint32 px)
+static void
+vsd_format_pixels (guint32 px,
+                   char    out[VSD_CELL])
 {
-    return px ? g_strdup_printf ("%5u", px) : g_strdup ("");
+    out[0] = '\0';
+    if (px)
+        g_snprintf (out, VSD_CELL, "%5u", px);
 }
-
-/* ===================================================================== */
-/*  Rozszerzenie Nautilusa                                                */
-/* ===================================================================== */
 
 typedef struct
 {
@@ -2071,7 +2569,6 @@ typedef struct
     GObjectClass parent_class;
 } VideoSizeDurationProviderClass;
 
-/* Uchwyt jednej operacji; Nautilus widzi go jako NautilusOperationHandle*. */
 typedef struct
 {
     GClosure             *update_complete;
@@ -2088,12 +2585,15 @@ typedef struct
 
 static void vsd_column_provider_iface_init (NautilusColumnProviderInterface *iface);
 static void vsd_info_provider_iface_init (NautilusInfoProviderInterface *iface);
+static void vsd_menu_provider_iface_init (NautilusMenuProviderInterface *iface);
 
 G_DEFINE_DYNAMIC_TYPE_EXTENDED (VideoSizeDurationProvider, video_size_duration_provider, G_TYPE_OBJECT, 0,
                                 G_IMPLEMENT_INTERFACE_DYNAMIC (NAUTILUS_TYPE_COLUMN_PROVIDER,
                                                                vsd_column_provider_iface_init)
                                 G_IMPLEMENT_INTERFACE_DYNAMIC (NAUTILUS_TYPE_INFO_PROVIDER,
-                                                               vsd_info_provider_iface_init))
+                                                               vsd_info_provider_iface_init)
+                                G_IMPLEMENT_INTERFACE_DYNAMIC (NAUTILUS_TYPE_MENU_PROVIDER,
+                                                               vsd_menu_provider_iface_init))
 
 static void video_size_duration_provider_init (VideoSizeDurationProvider *self) { (void) self; }
 static void video_size_duration_provider_class_init (VideoSizeDurationProviderClass *klass) { (void) klass; }
@@ -2108,7 +2608,7 @@ vsd_column_new (const char *attribute,
 
     g_object_set (column,
                   "xalign", 1.0,
-                  "default-sort-order", 1, /* GTK_SORT_DESCENDING: największe na górze */
+                  "default-sort-order", 1,
                   NULL);
     return column;
 }
@@ -2133,47 +2633,50 @@ vsd_column_provider_iface_init (NautilusColumnProviderInterface *iface)
 }
 
 static const char *const vsd_suffixes[] = {
-    ".mp4", ".m4v", ".m4a", ".m4b", ".mov", ".3gp", ".3g2",
-    ".mkv", ".mka", ".webm", ".avi", ".wav", ".ogg", ".oga", ".ogv", ".opus", ".spx",
-    ".flac", ".wma", ".wmv", ".asf", ".mp3", ".mp2", ".aac", NULL
+    "mp4", "m4v", "m4a", "m4b", "mov", "3gp", "3g2",
+    "mkv", "mka", "webm", "avi", "wav", "ogg", "oga", "ogv", "opus", "spx",
+    "flac", "wma", "wmv", "asf", "mp3", "mp2", "aac", NULL
 };
 
-/* Czy warto otwierać plik; zwraca też podpowiedzi dla parsera. */
 static gboolean
 vsd_is_candidate (NautilusFileInfo *file,
                   guint            *hints)
 {
     g_autofree char *mime = NULL;
     g_autofree char *name = NULL;
-    g_autofree char *lower = NULL;
+    const char *dot;
     gboolean known_suffix = FALSE;
 
     *hints = 0;
-    /* Tylko zwykłe pliki: czytanie np. kolejki FIFO zablokowałoby wątek. */
     if (nautilus_file_info_get_file_type (file) != G_FILE_TYPE_REGULAR)
         return FALSE;
 
     name = nautilus_file_info_get_name (file);
-    lower = name ? g_utf8_strdown (name, -1) : g_strdup ("");
-    for (const char *const *suffix = vsd_suffixes; *suffix != NULL; suffix++)
+    dot = name != NULL ? strrchr (name, '.') : NULL;
+    if (dot != NULL && dot[1] != '\0' && strlen (dot + 1) <= 4)
     {
-        if (g_str_has_suffix (lower, *suffix))
-            known_suffix = TRUE;
+        char ext[5];
+        gsize n = 0;
+
+        for (const char *c = dot + 1; *c != '\0'; c++)
+            ext[n++] = g_ascii_tolower (*c);
+        ext[n] = '\0';
+        for (const char *const *suffix = vsd_suffixes; *suffix != NULL && !known_suffix; suffix++)
+            known_suffix = strcmp (ext, *suffix) == 0;
+        if (known_suffix && (strcmp (ext, "mp3") == 0 || strcmp (ext, "mp2") == 0 || strcmp (ext, "aac") == 0))
+            *hints |= VSD_HINT_MPEG_AUDIO;
     }
-    if (g_str_has_suffix (lower, ".mp3") || g_str_has_suffix (lower, ".mp2") || g_str_has_suffix (lower, ".aac"))
-        *hints |= VSD_HINT_MPEG_AUDIO;
 
     mime = nautilus_file_info_get_mime_type (file);
     if (mime != NULL && (g_str_equal (mime, "audio/mpeg") || g_str_has_prefix (mime, "audio/aac") ||
                          g_str_has_prefix (mime, "audio/x-aac") || g_str_equal (mime, "audio/x-hx-aac-adts")))
         *hints |= VSD_HINT_MPEG_AUDIO;
 
-    /* Wszystkie typy audio/... i video/... sprawdzamy po zawartości; nieobsługiwane dostaną pustą komórkę. */
     return known_suffix ||
            (mime != NULL && (g_str_has_prefix (mime, "video/") || g_str_has_prefix (mime, "audio/") ||
                              g_str_equal (mime, "application/ogg") ||
                              g_str_equal (mime, "application/mp4") ||
-                             g_str_equal (mime, "application/x-matroska") ||  /* MKV bez rozszerzenia */
+                             g_str_equal (mime, "application/x-matroska") ||
                              g_str_equal (mime, "application/vnd.ms-asf")));
 }
 
@@ -2181,9 +2684,11 @@ static void
 vsd_set_attributes (NautilusFileInfo *file,
                     const VsdMedia   *m)
 {
-    g_autofree char *duration = vsd_format_duration (m ? m->seconds : 0.0);
-    g_autofree char *width = vsd_format_pixels (m ? m->width : 0);
-    g_autofree char *height = vsd_format_pixels (m ? m->height : 0);
+    char duration[VSD_CELL], width[VSD_CELL], height[VSD_CELL];
+
+    vsd_format_duration (m ? m->seconds : 0.0, duration);
+    vsd_format_pixels (m ? m->width : 0, width);
+    vsd_format_pixels (m ? m->height : 0, height);
 
     nautilus_file_info_add_string_attribute (file, VSD_ATTR_DURATION, duration);
     nautilus_file_info_add_string_attribute (file, VSD_ATTR_WIDTH, width);
@@ -2222,7 +2727,6 @@ vsd_probe_thread (GTask        *task,
     g_task_return_pointer (task, media, g_free);
 }
 
-/* Wraca w głównym wątku (tam, gdzie powstało zadanie). */
 static void
 vsd_probe_done (GObject      *source_object,
                 GAsyncResult *result,
@@ -2243,7 +2747,6 @@ vsd_probe_done (GObject      *source_object,
                      media ? media->seconds : 0.0, media ? media->width : 0, media ? media->height : 0);
     }
 
-    /* Po cancel_update() Nautilus nie czeka już na odpowiedź i nie wolno jej wysłać. */
     if (!cancelled)
     {
         vsd_set_attributes (request->file, media);
@@ -2266,8 +2769,6 @@ vsd_update_file_info (NautilusInfoProvider     *provider,
     guint hints;
     g_autoptr (GTask) task = NULL;
 
-    /* Atrybuty ustawiamy każdemu plikowi (choćby puste), żeby strcmp()
-     * w sortowaniu Nautilusa porównywał spójnie całą listę. */
     if (!vsd_is_candidate (file, &hints))
     {
         vsd_set_attributes (file, NULL);
@@ -2300,7 +2801,7 @@ vsd_cancel_update (NautilusInfoProvider    *provider,
     VsdRequest *request = (VsdRequest *) handle;
 
     (void) provider;
-    /* Zwolnienie nastąpi w vsd_probe_done(), które GTask wywoła zawsze. */
+
     g_cancellable_cancel (request->cancellable);
 }
 
@@ -2311,9 +2812,297 @@ vsd_info_provider_iface_init (NautilusInfoProviderInterface *iface)
     iface->cancel_update = vsd_cancel_update;
 }
 
-/* ===================================================================== */
-/*  Punkty wejścia modułu                                                 */
-/* ===================================================================== */
+typedef struct
+{
+    const char *attribute;
+    gboolean    reversed;
+} VsdSortChoice;
+
+static const VsdSortChoice vsd_sort_choices[6] = {
+    { VSD_ATTR_DURATION, TRUE }, { VSD_ATTR_DURATION, FALSE },
+    { VSD_ATTR_WIDTH, TRUE },    { VSD_ATTR_WIDTH, FALSE },
+    { VSD_ATTR_HEIGHT, TRUE },   { VSD_ATTR_HEIGHT, FALSE },
+};
+
+static gpointer
+vsd_gtk_symbol (const char *name)
+{
+    static GModule *self = NULL;
+    static gsize once = 0;
+    gpointer sym = NULL;
+
+    if (g_once_init_enter (&once))
+    {
+        self = g_module_open (NULL, 0);
+        g_once_init_leave (&once, 1);
+    }
+    if (self == NULL || !g_module_symbol (self, name, &sym))
+        return NULL;
+    return sym;
+}
+
+typedef gboolean (*VsdActivateActionFn) (gpointer    widget,
+                                         const char *name,
+                                         GVariant   *args);
+typedef gpointer (*VsdWidgetFn) (gpointer widget);
+typedef GList   *(*VsdAppWindowsFn) (gpointer app);
+
+static VsdActivateActionFn
+vsd_gtk_activate_action (void)
+{
+    return (VsdActivateActionFn) vsd_gtk_symbol ("gtk_widget_activate_action_variant");
+}
+
+static void
+vsd_sort_activate (NautilusMenuItem *item,
+                   gpointer          user_data)
+{
+    const VsdSortChoice *choice = user_data;
+    VsdActivateActionFn activate = vsd_gtk_activate_action ();
+    GApplication *app = g_application_get_default ();
+    g_autoptr (GObject) window = NULL;
+    g_autoptr (GVariant) args = NULL;
+
+    (void) item;
+    if (activate == NULL || app == NULL ||
+        g_object_class_find_property (G_OBJECT_GET_CLASS (app), "active-window") == NULL)
+    {
+        g_warning ("Nie można zmienić sortowania: brak GTK / sorting unavailable");
+        return;
+    }
+    g_object_get (app, "active-window", &window, NULL);
+    if (window == NULL)
+        return;
+
+    args = g_variant_ref_sink (g_variant_new ("(sb)", choice->attribute, choice->reversed));
+    if (!activate (window, "view.sort", args))
+        g_warning ("Akcja view.sort niedostępna / view.sort action not found");
+    else
+        g_debug ("Sortowanie / sort: %s%s", choice->attribute, choice->reversed ? " (malejąco)" : "");
+}
+
+#define VSD_SECTION_ATTR "nvsd-sort-section"
+
+static gboolean vsd_inject_pending = FALSE;
+
+static gboolean
+vsd_is_view_menu (GMenuModel *model)
+{
+    g_autoptr (GMenuModel) section = NULL;
+
+    if (!G_IS_MENU (model) || g_menu_model_get_n_items (model) < 2)
+        return FALSE;
+    section = g_menu_model_get_item_link (model, 1, G_MENU_LINK_SECTION);
+    if (section == NULL)
+        return FALSE;
+    for (int i = 0; i < g_menu_model_get_n_items (section); i++)
+    {
+        g_autofree char *action = NULL;
+
+        if (g_menu_model_get_item_attribute (section, i, G_MENU_ATTRIBUTE_ACTION, "s", &action) &&
+            g_str_equal (action, "view.sort"))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static gboolean
+vsd_has_sort_section (GMenuModel *menu)
+{
+    for (int i = 0; i < g_menu_model_get_n_items (menu); i++)
+    {
+        gboolean mine = FALSE;
+
+        if (g_menu_model_get_item_attribute (menu, i, VSD_SECTION_ATTR, "b", &mine) && mine)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void
+vsd_inject_sort_section (GMenu *view_menu)
+{
+    const VsdStrings *s = vsd_pick_strings ();
+    g_autoptr (GMenu) section = NULL;
+    g_autoptr (GMenuItem) item = NULL;
+
+    if (vsd_has_sort_section (G_MENU_MODEL (view_menu)))
+        return;
+
+    section = g_menu_new ();
+    for (int i = 0; i < (int) G_N_ELEMENTS (vsd_sort_choices); i++)
+    {
+        g_autoptr (GMenuItem) choice = g_menu_item_new (s->sort_items[i], NULL);
+
+        g_menu_item_set_action_and_target_value (choice, "view.sort",
+                                                 g_variant_new ("(sb)", vsd_sort_choices[i].attribute,
+                                                                vsd_sort_choices[i].reversed));
+        g_menu_append_item (section, choice);
+    }
+    item = g_menu_item_new_section (s->sort_section, G_MENU_MODEL (section));
+    g_menu_item_set_attribute (item, VSD_SECTION_ATTR, "b", TRUE);
+    g_menu_insert_item (view_menu, 2, item);
+    g_debug ("Dodano sekcję do menu „Porządkowanie” / sort section added");
+}
+
+typedef struct
+{
+    VsdWidgetFn first_child;
+    VsdWidgetFn next_sibling;
+    GType       skip;
+    int         budget;
+    gpointer    found;
+} VsdWalk;
+
+#define VSD_WINDOW_KEY "nvsd-view-menu"
+
+static void
+vsd_weak_ref_free (gpointer data)
+{
+    g_weak_ref_clear (data);
+    g_free (data);
+}
+
+static gboolean
+vsd_window_ready (GObject *window)
+{
+    GWeakRef *ref = g_object_get_data (window, VSD_WINDOW_KEY);
+    g_autoptr (GObject) holder = ref != NULL ? g_weak_ref_get (ref) : NULL;
+    g_autoptr (GMenuModel) model = NULL;
+
+    if (holder == NULL)
+        return FALSE;
+    g_object_get (holder, "menu-model", &model, NULL);
+    return model != NULL && vsd_has_sort_section (model);
+}
+
+static void
+vsd_window_remember (GObject  *window,
+                     gpointer  holder)
+{
+    GWeakRef *ref = g_new0 (GWeakRef, 1);
+
+    g_weak_ref_init (ref, holder);
+    g_object_set_data_full (window, VSD_WINDOW_KEY, ref, vsd_weak_ref_free);
+}
+
+static void
+vsd_walk_widget (VsdWalk  *walk,
+                 gpointer  widget,
+                 int       depth)
+{
+    GParamSpec *pspec;
+
+    if (widget == NULL || walk->budget-- <= 0 || depth > 48)
+        return;
+    if (walk->skip != 0 && g_type_is_a (G_OBJECT_TYPE (widget), walk->skip))
+        return;
+
+    pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (widget), "menu-model");
+    if (pspec != NULL && g_type_is_a (pspec->value_type, G_TYPE_MENU_MODEL))
+    {
+        g_autoptr (GMenuModel) model = NULL;
+
+        g_object_get (widget, "menu-model", &model, NULL);
+        if (model != NULL && vsd_is_view_menu (model))
+        {
+            vsd_inject_sort_section (G_MENU (model));
+            walk->found = widget;
+        }
+    }
+    for (gpointer child = walk->first_child (widget); child != NULL; child = walk->next_sibling (child))
+        vsd_walk_widget (walk, child, depth + 1);
+}
+
+static gboolean
+vsd_inject_idle (gpointer user_data)
+{
+    GApplication *app = g_application_get_default ();
+    VsdAppWindowsFn get_windows = (VsdAppWindowsFn) vsd_gtk_symbol ("gtk_application_get_windows");
+    GType gtk_app = g_type_from_name ("GtkApplication");
+    VsdWalk walk = {
+        (VsdWidgetFn) vsd_gtk_symbol ("gtk_widget_get_first_child"),
+        (VsdWidgetFn) vsd_gtk_symbol ("gtk_widget_get_next_sibling"),
+        g_type_from_name ("GtkListBase"),
+        0,
+        NULL,
+    };
+
+    (void) user_data;
+    vsd_inject_pending = FALSE;
+    if (app == NULL || gtk_app == 0 || !g_type_is_a (G_OBJECT_TYPE (app), gtk_app) ||
+        get_windows == NULL || walk.first_child == NULL || walk.next_sibling == NULL)
+        return G_SOURCE_REMOVE;
+
+    for (GList *l = get_windows (app); l != NULL; l = l->next)
+    {
+        if (vsd_window_ready (l->data))
+            continue;
+        walk.budget = 20000;
+        walk.found = NULL;
+        vsd_walk_widget (&walk, l->data, 0);
+        if (walk.found != NULL)
+            vsd_window_remember (l->data, walk.found);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void
+vsd_schedule_injection (void)
+{
+    if (vsd_inject_pending)
+        return;
+    vsd_inject_pending = TRUE;
+    g_idle_add (vsd_inject_idle, NULL);
+}
+
+static GList *
+vsd_get_background_items (NautilusMenuProvider *provider,
+                          NautilusFileInfo     *current_folder)
+{
+    const VsdStrings *s = vsd_pick_strings ();
+    NautilusMenuItem *parent;
+    NautilusMenu *menu;
+
+    (void) provider;
+    (void) current_folder;
+    vsd_schedule_injection ();
+
+    parent = nautilus_menu_item_new ("VideoSizeDuration::sort", s->sort_menu, s->sort_tip, NULL);
+    menu = nautilus_menu_new ();
+    for (int i = 0; i < (int) G_N_ELEMENTS (vsd_sort_choices); i++)
+    {
+        char name[40];
+        NautilusMenuItem *item;
+
+        g_snprintf (name, sizeof name, "VideoSizeDuration::sort-%d", i);
+        item = nautilus_menu_item_new (name, s->sort_items[i], s->sort_tip, NULL);
+
+        g_signal_connect (item, "activate", G_CALLBACK (vsd_sort_activate),
+                          (gpointer) &vsd_sort_choices[i]);
+        nautilus_menu_append_item (menu, item);
+        g_object_unref (item);
+    }
+    nautilus_menu_item_set_submenu (parent, menu);
+    g_object_unref (menu);
+    return g_list_append (NULL, parent);
+}
+
+static GList *
+vsd_get_file_items (NautilusMenuProvider *provider,
+                    GList                *files)
+{
+    (void) provider;
+    (void) files;
+    return NULL;
+}
+
+static void
+vsd_menu_provider_iface_init (NautilusMenuProviderInterface *iface)
+{
+    iface->get_file_items = vsd_get_file_items;
+    iface->get_background_items = vsd_get_background_items;
+}
 
 static GType vsd_types[1];
 
@@ -2337,17 +3126,1417 @@ nautilus_module_list_types (const GType **types,
     *types = vsd_types;
     *num_types = G_N_ELEMENTS (vsd_types);
 }
+#endif
+
+#ifdef VSD_THUMBNAILER
+
+#include <cairo.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <glib/gstdio.h>
+
+#define VSD_THUMB_NAME     "nautilus-video-size-duration-thumbnailer"
+#define VSD_THUMB_FILE_PFX "nautilus-video-size-duration"
+#define VSD_THUMB_GUARD    "NVSD_THUMBNAILER_ACTIVE"
+
+static char *
+vsd_format_human (double seconds)
+{
+    guint64 s;
+
+    if (seconds <= 0.0 || seconds > VSD_MAX_SECONDS)
+        return NULL;
+    s = (guint64) (seconds + 0.5);
+    if (s >= 3600)
+        return g_strdup_printf ("%" G_GUINT64_FORMAT "h %um %us",
+                                s / 3600, (guint) (s / 60 % 60), (guint) (s % 60));
+    if (s >= 60)
+        return g_strdup_printf ("%um %us", (guint) (s / 60), (guint) (s % 60));
+    return g_strdup_printf ("%us", (guint) s);
+}
+
+static double
+vsd_glyph_path (cairo_t *cr,
+                char     c)
+{
+    switch (c)
+    {
+        case '0':
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 3, 3, G_PI, 2 * G_PI);
+            cairo_arc (cr, 3, 7, 3, 0, G_PI);
+            cairo_close_path (cr);
+            return 6;
+        case '1':
+            cairo_move_to (cr, 1.0, 2.4);
+            cairo_line_to (cr, 3.6, 0);
+            cairo_line_to (cr, 3.6, 10);
+            return 6;
+        case '2':
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 3, 3, G_PI, G_PI * 2.2);
+            cairo_line_to (cr, 0, 10);
+            cairo_line_to (cr, 6, 10);
+            return 6;
+        case '3':
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 2.5, 2.5, G_PI * 1.1, G_PI * 2.5);
+            cairo_arc (cr, 3, 7.5, 2.5, -G_PI * 0.5, G_PI * 0.9);
+            return 6;
+        case '4':
+            cairo_move_to (cr, 4.4, 10);
+            cairo_line_to (cr, 4.4, 0);
+            cairo_line_to (cr, 0, 6.8);
+            cairo_line_to (cr, 6, 6.8);
+            return 6;
+        case '5':
+            cairo_move_to (cr, 5.6, 0);
+            cairo_line_to (cr, 1.0, 0);
+            cairo_line_to (cr, 0.8, 4.5);
+            cairo_arc (cr, 3, 6.9, 3.1, -2.3, 2.6);
+            return 6;
+        case '6':
+            cairo_move_to (cr, 4.6, 0);
+            cairo_line_to (cr, 0.43, 5.45);
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 7, 3, 0, 2 * G_PI);
+            return 6;
+        case '7':
+            cairo_move_to (cr, 0, 0);
+            cairo_line_to (cr, 6, 0);
+            cairo_line_to (cr, 1.8, 10);
+            return 6;
+        case '8':
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 2.4, 2.4, 0, 2 * G_PI);
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 7.3, 2.7, 0, 2 * G_PI);
+            return 6;
+        case '9':
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, 3, 3, 3, 0, 2 * G_PI);
+            cairo_move_to (cr, 5.57, 4.55);
+            cairo_line_to (cr, 1.4, 10);
+            return 6;
+        case 'h':
+            cairo_move_to (cr, 0.6, 0);
+            cairo_line_to (cr, 0.6, 10);
+            cairo_move_to (cr, 0.6, 6.0);
+            cairo_arc (cr, 2.85, 6.0, 2.25, G_PI, 2 * G_PI);
+            cairo_line_to (cr, 5.1, 10);
+            return 5.7;
+        case 'm':
+            cairo_move_to (cr, 0.6, 3.8);
+            cairo_line_to (cr, 0.6, 10);
+            cairo_move_to (cr, 0.6, 5.8);
+            cairo_arc (cr, 2.6, 5.8, 2.0, G_PI, 2 * G_PI);
+            cairo_line_to (cr, 4.6, 10);
+            cairo_move_to (cr, 4.6, 5.8);
+            cairo_arc (cr, 6.6, 5.8, 2.0, G_PI, 2 * G_PI);
+            cairo_line_to (cr, 8.6, 10);
+            return 9.2;
+        case 's':
+            cairo_new_sub_path (cr);
+            cairo_arc_negative (cr, 2.6, 5.4, 1.6, -0.35, -G_PI * 1.5);
+            cairo_arc (cr, 2.6, 8.5, 1.5, -G_PI * 0.5, G_PI - 0.45);
+            return 4.6;
+        case ' ':
+            return 2.8;
+        default:
+            return 0;
+    }
+}
+
+#define VSD_GLYPH_TRACKING 1.9
+#define VSD_GLYPH_STROKE   1.45
+
+static double
+vsd_text_width_units (const char *text)
+{
+    double w = 0.0;
+    cairo_surface_t *dummy = cairo_image_surface_create (CAIRO_FORMAT_A8, 1, 1);
+    cairo_t *cr = cairo_create (dummy);
+
+    for (const char *p = text; *p; p++)
+    {
+        w += vsd_glyph_path (cr, *p);
+        cairo_new_path (cr);
+        if (p[1] != '\0')
+            w += VSD_GLYPH_TRACKING;
+    }
+    cairo_destroy (cr);
+    cairo_surface_destroy (dummy);
+    return w;
+}
+
+static void
+vsd_draw_text (cairo_t    *cr,
+               const char *text,
+               double      x,
+               double      y,
+               double      k)
+{
+    for (const char *p = text; *p; p++)
+    {
+        double adv;
+
+        cairo_save (cr);
+        cairo_translate (cr, x, y);
+        cairo_scale (cr, k, k);
+        cairo_new_path (cr);
+        adv = vsd_glyph_path (cr, *p);
+        cairo_restore (cr);
+        cairo_stroke (cr);
+        x += (adv + VSD_GLYPH_TRACKING) * k;
+    }
+}
+
+static void
+vsd_draw_icon (cairo_t  *cr,
+               gboolean  video,
+               double    x,
+               double    y,
+               double    k)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, k, k);
+    cairo_new_path (cr);
+    if (video)
+    {
+        cairo_move_to (cr, 0.6, 0.6);
+        cairo_line_to (cr, 8.4, 5.0);
+        cairo_line_to (cr, 0.6, 9.4);
+        cairo_close_path (cr);
+        cairo_restore (cr);
+        cairo_fill_preserve (cr);
+        cairo_stroke (cr);
+        return;
+    }
+    cairo_save (cr);
+    cairo_translate (cr, 2.7, 8.1);
+    cairo_rotate (cr, -0.35);
+    cairo_scale (cr, 2.7, 1.9);
+    cairo_arc (cr, 0, 0, 1, 0, 2 * G_PI);
+    cairo_restore (cr);
+    cairo_restore (cr);
+    cairo_fill (cr);
+
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, k, k);
+    cairo_move_to (cr, 5.1, 7.8);
+    cairo_line_to (cr, 5.1, 0.4);
+    cairo_curve_to (cr, 6.4, 1.8, 8.8, 2.4, 7.8, 5.6);
+    cairo_restore (cr);
+    cairo_stroke (cr);
+}
+
+static void
+vsd_rounded_rect (cairo_t *cr,
+                  double   x,
+                  double   y,
+                  double   w,
+                  double   h,
+                  double   r)
+{
+    r = MIN (r, MIN (w, h) / 2);
+    cairo_new_sub_path (cr);
+    cairo_arc (cr, x + w - r, y + r, r, -G_PI / 2, 0);
+    cairo_arc (cr, x + w - r, y + h - r, r, 0, G_PI / 2);
+    cairo_arc (cr, x + r, y + h - r, r, G_PI / 2, G_PI);
+    cairo_arc (cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
+    cairo_close_path (cr);
+}
+
+static void
+vsd_draw_badge (cairo_t    *cr,
+                int         w,
+                int         h,
+                const char *label,
+                gboolean    video)
+{
+    double text_units = vsd_text_width_units (label);
+    double bh = 12.0 + 0.075 * MAX (w, h);
+    double k, pad, gap, icon_w, bw, margin, border;
+
+    bh = MIN (bh, 0.30 * h);
+    for (int i = 0; i < 2; i++)
+    {
+        k = bh * 0.50 / 10.0;
+        pad = bh * 0.32;
+        gap = bh * 0.24;
+        icon_w = 9.0 * k;
+        bw = pad + icon_w + gap + text_units * k + pad;
+        margin = MAX (2.0, bh * 0.28);
+        if (bw + 2 * margin <= w)
+            break;
+        bh *= (w - 2 * margin) / (bw + 2 * margin) * 0.98;
+    }
+    if (bh < 10.0)
+        return;
+
+    k = bh * 0.50 / 10.0;
+    pad = bh * 0.32;
+    gap = bh * 0.24;
+    icon_w = 9.0 * k;
+    bw = pad + icon_w + gap + text_units * k + pad;
+    margin = MAX (2.0, bh * 0.28);
+    border = MAX (1.0, bh * 0.055);
+
+    cairo_save (cr);
+    vsd_rounded_rect (cr, margin, margin, bw, bh, bh * 0.24);
+    cairo_set_source_rgba (cr, 0, 0, 0, 0.72);
+    cairo_fill (cr);
+    vsd_rounded_rect (cr, margin + border / 2, margin + border / 2, bw - border, bh - border,
+                      bh * 0.24 - border / 2);
+    cairo_set_source_rgba (cr, 1, 1, 1, 0.88);
+    cairo_set_line_width (cr, border);
+    cairo_stroke (cr);
+
+    cairo_set_source_rgb (cr, 1, 1, 1);
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_width (cr, VSD_GLYPH_STROKE * k);
+    vsd_draw_icon (cr, video, margin + pad, margin + (bh - 10 * k) / 2, k);
+    vsd_draw_text (cr, label, margin + pad + icon_w + gap, margin + (bh - 10 * k) / 2, k);
+    cairo_restore (cr);
+}
+
+static void
+vsd_nib_stroke (cairo_t *cr,
+                void   (*path) (cairo_t *),
+                double   nib,
+                double   angle,
+                double   thin)
+{
+    const int passes = 14;
+
+    for (int i = 0; i <= passes; i++)
+    {
+        double t = (i / (double) passes - 0.5) * nib;
+
+        cairo_save (cr);
+        cairo_translate (cr, t * cos (angle), t * sin (angle));
+        cairo_new_path (cr);
+        path (cr);
+        cairo_restore (cr);
+        cairo_set_line_width (cr, thin);
+        cairo_stroke (cr);
+    }
+}
+
+static void
+vsd_g_clef_path (cairo_t *cr)
+{
+    cairo_move_to (cr, 1.42, 3.02);
+    cairo_curve_to (cr, 1.42, 3.40, 1.05, 3.52, 0.82, 3.30);
+    cairo_curve_to (cr, 0.52, 3.02, 0.62, 2.45, 1.05, 2.22);
+    cairo_curve_to (cr, 1.62, 1.95, 2.28, 2.35, 2.25, 3.05);
+    cairo_curve_to (cr, 2.22, 3.80, 1.55, 4.22, 1.02, 4.12);
+    cairo_curve_to (cr, 0.35, 4.00, -0.05, 3.40, 0.05, 2.70);
+    cairo_curve_to (cr, 0.18, 1.85, 0.95, 1.30, 1.40, 0.72);
+    cairo_curve_to (cr, 1.85, 0.12, 2.02, -0.75, 1.72, -1.45);
+    cairo_curve_to (cr, 1.55, -1.85, 1.20, -1.80, 1.05, -1.30);
+    cairo_curve_to (cr, 0.88, -0.75, 1.05, 0.40, 1.22, 1.60);
+    cairo_line_to (cr, 1.62, 4.85);
+    cairo_curve_to (cr, 1.70, 5.45, 1.35, 5.80, 0.95, 5.70);
+    cairo_curve_to (cr, 0.72, 5.64, 0.62, 5.48, 0.66, 5.32);
+}
+
+static void
+vsd_notehead (cairo_t *cr,
+              double   x,
+              double   y,
+              double   s)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_rotate (cr, -0.36);
+    cairo_scale (cr, 0.60 * s, 0.43 * s);
+    cairo_new_sub_path (cr);
+    cairo_arc (cr, 0, 0, 1, 0, 2 * G_PI);
+    cairo_restore (cr);
+    cairo_fill (cr);
+}
+
+static void
+vsd_time_digit4 (cairo_t *cr,
+                 double   x,
+                 double   y,
+                 double   s)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, s, s);
+    cairo_move_to (cr, 0.92, 0.00);
+    cairo_line_to (cr, 1.30, 0.00);
+    cairo_line_to (cr, 0.36, 1.30);
+    cairo_line_to (cr, 1.10, 1.30);
+    cairo_line_to (cr, 1.10, 0.62);
+    cairo_line_to (cr, 1.42, 0.40);
+    cairo_line_to (cr, 1.42, 1.30);
+    cairo_line_to (cr, 1.62, 1.30);
+    cairo_line_to (cr, 1.62, 1.50);
+    cairo_line_to (cr, 1.42, 1.50);
+    cairo_line_to (cr, 1.42, 1.80);
+    cairo_curve_to (cr, 1.42, 1.92, 1.52, 1.95, 1.64, 1.96);
+    cairo_line_to (cr, 1.64, 2.00);
+    cairo_line_to (cr, 0.86, 2.00);
+    cairo_line_to (cr, 0.86, 1.96);
+    cairo_curve_to (cr, 1.00, 1.95, 1.10, 1.92, 1.10, 1.80);
+    cairo_line_to (cr, 1.10, 1.50);
+    cairo_line_to (cr, 0.05, 1.50);
+    cairo_line_to (cr, 0.05, 1.36);
+    cairo_close_path (cr);
+    cairo_restore (cr);
+    cairo_fill (cr);
+}
+
+typedef enum
+{
+    VSD_CARD_CLASSIC,
+    VSD_CARD_MP3,
+    VSD_CARD_WAV,
+    VSD_CARD_FLAC,
+    VSD_CARD_OGG,
+    VSD_CARD_AAC,
+} VsdCard;
+
+typedef enum
+{
+    VSD_CLEF_TREBLE,
+    VSD_CLEF_BASS,
+    VSD_CLEF_DRUMS,
+} VsdClef;
+
+#define VSD_NO_HEAD      127
+#define VSD_COL_STACCATO 1u
+#define VSD_COL_BAR      2u
+#define VSD_COL_SYSTEM   4u
+#define VSD_COL_TRIPLET  8u
+#define VSD_COL_SPLIT    16u
+#define VSD_ACC_SHARP    1
+#define VSD_ACC_NATURAL  2
+#define VSD_MAX_SYSTEMS  4
+
+typedef struct
+{
+    gint8  head;
+    guint8 dur;
+    guint8 beam;
+    guint8 bits;
+    guint8 acc;
+} VsdCol;
+
+typedef struct
+{
+    double        center[3];
+    double        edge[3];
+    double        frame[3];
+    VsdClef       clef;
+    int           lines;
+    int           sharps;
+    int           beats;
+    const VsdCol *cols;
+    guint         n_cols;
+} VsdScore;
+
+static void
+vsd_draw_paper (cairo_t      *cr,
+                int           size,
+                const double  center[3],
+                const double  edge[3],
+                const double  frame[3])
+{
+    cairo_pattern_t *paper = cairo_pattern_create_radial (size * 0.5, size * 0.45, size * 0.1,
+                                                          size * 0.5, size * 0.5, size * 0.78);
+
+    cairo_pattern_add_color_stop_rgb (paper, 0, center[0], center[1], center[2]);
+    cairo_pattern_add_color_stop_rgb (paper, 1, edge[0], edge[1], edge[2]);
+    cairo_rectangle (cr, 0, 0, size, size);
+    cairo_set_source (cr, paper);
+    cairo_fill (cr);
+    cairo_pattern_destroy (paper);
+
+    cairo_set_source_rgba (cr, frame[0], frame[1], frame[2], 0.55);
+    cairo_set_line_width (cr, MAX (1.0, size * 0.006));
+    cairo_rectangle (cr, size * 0.045, size * 0.045, size * 0.91, size * 0.91);
+    cairo_stroke (cr);
+    cairo_set_line_width (cr, MAX (0.6, size * 0.0025));
+    cairo_rectangle (cr, size * 0.065, size * 0.065, size * 0.87, size * 0.87);
+    cairo_stroke (cr);
+}
+
+static void
+vsd_draw_staff (cairo_t *cr,
+                double   left,
+                double   right,
+                double   top,
+                double   sp,
+                int      lines)
+{
+    cairo_set_source_rgb (cr, 0.12, 0.09, 0.06);
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_BUTT);
+    cairo_set_line_width (cr, MAX (0.8, sp * 0.075));
+    for (int i = 0; i < 5; i++)
+    {
+        if (lines == 1 && i != 2)
+            continue;
+        cairo_move_to (cr, left, top + i * sp);
+        cairo_line_to (cr, right, top + i * sp);
+    }
+    cairo_stroke (cr);
+}
+
+static void
+vsd_f_clef_path (cairo_t *cr)
+{
+    cairo_move_to (cr, 0.16, 0.92);
+    cairo_curve_to (cr, 0.10, 0.30, 0.62, -0.06, 1.18, -0.04);
+    cairo_curve_to (cr, 1.86, -0.02, 2.24, 0.48, 2.22, 1.12);
+    cairo_curve_to (cr, 2.18, 2.06, 1.32, 2.86, 0.10, 3.42);
+}
+
+static void
+vsd_draw_clef (cairo_t *cr,
+               VsdClef  clef,
+               double   x,
+               double   top,
+               double   sp)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, top);
+    cairo_scale (cr, sp, sp);
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
+    if (clef == VSD_CLEF_TREBLE)
+    {
+        vsd_nib_stroke (cr, vsd_g_clef_path, 0.30, -0.95, 0.07);
+        cairo_new_sub_path (cr);
+        cairo_arc (cr, 0.83, 5.30, 0.27, 0, 2 * G_PI);
+        cairo_fill (cr);
+    }
+    else if (clef == VSD_CLEF_BASS)
+    {
+        vsd_nib_stroke (cr, vsd_f_clef_path, 0.30, -0.35, 0.07);
+        cairo_new_sub_path (cr);
+        cairo_arc (cr, 0.40, 1.00, 0.33, 0, 2 * G_PI);
+        cairo_new_sub_path (cr);
+        cairo_arc (cr, 2.72, 0.50, 0.16, 0, 2 * G_PI);
+        cairo_new_sub_path (cr);
+        cairo_arc (cr, 2.72, 1.50, 0.16, 0, 2 * G_PI);
+        cairo_fill (cr);
+    }
+    else
+    {
+        cairo_rectangle (cr, 0.25, 1.0, 0.36, 2.0);
+        cairo_rectangle (cr, 0.95, 1.0, 0.36, 2.0);
+        cairo_fill (cr);
+    }
+    cairo_restore (cr);
+}
+
+static void
+vsd_draw_music_card (cairo_t *cr,
+                     int      size)
+{
+    static const double center[3] = { 0.973, 0.945, 0.871 };
+    static const double edge[3] = { 0.871, 0.800, 0.643 };
+    static const double frame[3] = { 0.36, 0.27, 0.16 };
+    const double units = 2.7 + 0.4 + 1.7 + 0.8 + (0.8 + 4 * 2.0 + 1.2) + 0.5;
+
+    const double pitch[5] = { 4.0, 3.5, 3.0, 2.5, 1.5 };
+    double left = size * 0.11, right = size * 0.89;
+    double sp = (right - left) / units;
+    double top = size * 0.58 - 2 * sp;
+    double x, nx[5], stem = 3.3 * sp, hw = 0.55 * sp, beam1, beam2, bx;
+
+    vsd_draw_paper (cr, size, center, edge, frame);
+    vsd_draw_staff (cr, left, right, top, sp, 5);
+    vsd_draw_clef (cr, VSD_CLEF_TREBLE, left + 0.15 * sp, top, sp);
+
+    x = left + (2.7 + 0.4) * sp;
+    vsd_time_digit4 (cr, x, top, sp);
+    vsd_time_digit4 (cr, x, top + 2 * sp, sp);
+    x += (1.7 + 0.8) * sp;
+
+    for (int i = 0; i < 5; i++)
+    {
+        nx[i] = x + (0.8 + i * 2.0) * sp;
+        vsd_notehead (cr, nx[i], top + pitch[i] * sp, sp);
+    }
+
+    beam1 = top + pitch[1] * sp - stem;
+    beam2 = top + pitch[2] * sp - stem;
+    cairo_set_line_width (cr, MAX (0.8, sp * 0.09));
+    for (int i = 0; i < 4; i++)
+    {
+        double y1 = i == 1 ? beam1 : i == 2 ? beam2 : top + pitch[i] * sp - stem;
+
+        cairo_move_to (cr, nx[i] + hw - 0.04 * sp, top + pitch[i] * sp - 0.1 * sp);
+        cairo_line_to (cr, nx[i] + hw - 0.04 * sp, y1);
+    }
+    cairo_move_to (cr, nx[4] - hw + 0.04 * sp, top + pitch[4] * sp + 0.1 * sp);
+    cairo_line_to (cr, nx[4] - hw + 0.04 * sp, top + pitch[4] * sp + stem);
+    cairo_stroke (cr);
+
+    cairo_move_to (cr, nx[1] + hw - 0.09 * sp, beam1);
+    cairo_line_to (cr, nx[2] + hw + 0.01 * sp, beam2);
+    cairo_line_to (cr, nx[2] + hw + 0.01 * sp, beam2 + 0.48 * sp);
+    cairo_line_to (cr, nx[1] + hw - 0.09 * sp, beam1 + 0.48 * sp);
+    cairo_close_path (cr);
+    cairo_fill (cr);
+
+    cairo_save (cr);
+    cairo_translate (cr, nx[4], top - 0.9 * sp);
+    cairo_scale (cr, sp, sp);
+    cairo_move_to (cr, -0.95, 0.15);
+    cairo_curve_to (cr, -0.85, -0.85, 0.85, -0.85, 0.95, 0.15);
+    cairo_curve_to (cr, 0.72, -0.55, -0.72, -0.55, -0.95, 0.15);
+    cairo_close_path (cr);
+    cairo_new_sub_path (cr);
+    cairo_arc (cr, 0, 0.02, 0.15, 0, 2 * G_PI);
+    cairo_restore (cr);
+    cairo_fill (cr);
+
+    bx = right - 0.25 * sp;
+    cairo_rectangle (cr, bx - 0.05 * sp, top, 0.25 * sp, 4 * sp);
+    cairo_fill (cr);
+    cairo_move_to (cr, bx - 0.45 * sp, top);
+    cairo_line_to (cr, bx - 0.45 * sp, top + 4 * sp);
+    cairo_stroke (cr);
+}
+
+static void
+vsd_time_digit2 (cairo_t *cr,
+                 double   x,
+                 double   y,
+                 double   s)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, s, s);
+    cairo_move_to (cr, 0.12, 2.00);
+    cairo_line_to (cr, 1.52, 2.00);
+    cairo_line_to (cr, 1.60, 1.42);
+    cairo_line_to (cr, 1.52, 1.42);
+    cairo_curve_to (cr, 1.46, 1.58, 1.38, 1.64, 1.18, 1.64);
+    cairo_line_to (cr, 0.58, 1.64);
+    cairo_curve_to (cr, 1.02, 1.30, 1.50, 1.00, 1.50, 0.54);
+    cairo_curve_to (cr, 1.50, 0.18, 1.18, 0.00, 0.80, 0.00);
+    cairo_curve_to (cr, 0.40, 0.00, 0.12, 0.20, 0.12, 0.48);
+    cairo_curve_to (cr, 0.12, 0.68, 0.26, 0.80, 0.42, 0.80);
+    cairo_curve_to (cr, 0.58, 0.80, 0.70, 0.68, 0.70, 0.54);
+    cairo_curve_to (cr, 0.70, 0.40, 0.60, 0.33, 0.50, 0.30);
+    cairo_curve_to (cr, 0.58, 0.18, 0.70, 0.12, 0.82, 0.12);
+    cairo_curve_to (cr, 1.04, 0.12, 1.14, 0.32, 1.14, 0.58);
+    cairo_curve_to (cr, 1.14, 1.02, 0.76, 1.42, 0.12, 1.94);
+    cairo_close_path (cr);
+    cairo_restore (cr);
+    cairo_fill (cr);
+}
+
+static void
+vsd_time_digit3 (cairo_t *cr,
+                 double   x,
+                 double   y,
+                 double   s)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, s, s);
+    cairo_move_to (cr, 0.18, 0.40);
+    cairo_curve_to (cr, 0.18, 0.15, 0.45, 0.00, 0.78, 0.00);
+    cairo_curve_to (cr, 1.15, 0.00, 1.38, 0.20, 1.38, 0.48);
+    cairo_curve_to (cr, 1.38, 0.72, 1.18, 0.88, 0.92, 0.95);
+    cairo_curve_to (cr, 1.25, 1.00, 1.48, 1.22, 1.48, 1.48);
+    cairo_curve_to (cr, 1.48, 1.82, 1.18, 2.00, 0.75, 2.00);
+    cairo_curve_to (cr, 0.35, 2.00, 0.10, 1.85, 0.10, 1.58);
+    cairo_curve_to (cr, 0.10, 1.40, 0.23, 1.28, 0.40, 1.28);
+    cairo_curve_to (cr, 0.56, 1.28, 0.66, 1.40, 0.66, 1.54);
+    cairo_curve_to (cr, 0.66, 1.66, 0.58, 1.74, 0.50, 1.78);
+    cairo_curve_to (cr, 0.58, 1.86, 0.68, 1.89, 0.78, 1.89);
+    cairo_curve_to (cr, 1.02, 1.89, 1.10, 1.70, 1.10, 1.48);
+    cairo_curve_to (cr, 1.10, 1.20, 0.95, 1.02, 0.62, 1.02);
+    cairo_line_to (cr, 0.62, 0.92);
+    cairo_curve_to (cr, 0.92, 0.92, 1.04, 0.72, 1.04, 0.50);
+    cairo_curve_to (cr, 1.04, 0.28, 0.94, 0.11, 0.76, 0.11);
+    cairo_curve_to (cr, 0.66, 0.11, 0.58, 0.15, 0.52, 0.22);
+    cairo_curve_to (cr, 0.62, 0.26, 0.70, 0.34, 0.70, 0.45);
+    cairo_curve_to (cr, 0.70, 0.59, 0.58, 0.70, 0.44, 0.70);
+    cairo_curve_to (cr, 0.29, 0.70, 0.18, 0.58, 0.18, 0.40);
+    cairo_close_path (cr);
+    cairo_restore (cr);
+    cairo_fill (cr);
+}
+
+static void
+vsd_draw_time_digit (cairo_t *cr,
+                     int      digit,
+                     double   x,
+                     double   y,
+                     double   s)
+{
+    if (digit == 2)
+        vsd_time_digit2 (cr, x + 0.02 * s, y, s);
+    else if (digit == 3)
+        vsd_time_digit3 (cr, x + 0.04 * s, y, s);
+    else
+        vsd_time_digit4 (cr, x, y, s);
+}
+
+static void
+vsd_draw_accidental (cairo_t *cr,
+                     int      kind,
+                     double   x,
+                     double   y,
+                     double   s)
+{
+    cairo_save (cr);
+    cairo_translate (cr, x, y);
+    cairo_scale (cr, s, s);
+    if (kind == VSD_ACC_SHARP)
+    {
+        cairo_rectangle (cr, -0.27, -1.30, 0.10, 2.50);
+        cairo_rectangle (cr, 0.17, -1.20, 0.10, 2.50);
+        for (int k = -1; k <= 1; k += 2)
+        {
+            double yy = k * 0.42;
+
+            cairo_move_to (cr, -0.45, yy + 0.06);
+            cairo_line_to (cr, 0.45, yy - 0.16);
+            cairo_line_to (cr, 0.45, yy + 0.10);
+            cairo_line_to (cr, -0.45, yy + 0.32);
+            cairo_close_path (cr);
+        }
+    }
+    else
+    {
+        cairo_rectangle (cr, -0.27, -1.25, 0.10, 1.80);
+        cairo_rectangle (cr, 0.17, -0.55, 0.10, 1.80);
+        cairo_move_to (cr, -0.27, -0.30);
+        cairo_line_to (cr, 0.27, -0.46);
+        cairo_line_to (cr, 0.27, -0.20);
+        cairo_line_to (cr, -0.27, -0.04);
+        cairo_close_path (cr);
+        cairo_move_to (cr, -0.27, 0.36);
+        cairo_line_to (cr, 0.27, 0.20);
+        cairo_line_to (cr, 0.27, 0.46);
+        cairo_line_to (cr, -0.27, 0.62);
+        cairo_close_path (cr);
+    }
+    cairo_restore (cr);
+    cairo_fill (cr);
+}
+
+#define VSD_S  VSD_COL_STACCATO
+#define VSD_B  VSD_COL_BAR
+#define VSD_L  VSD_COL_SYSTEM
+#define VSD_T  VSD_COL_TRIPLET
+#define VSD_P  VSD_COL_SPLIT
+
+static const VsdCol vsd_cols_mp3[] = {
+    { 6,  8, 1, VSD_S, 0 },
+    { 5,  8, 1, VSD_S, 0 },
+    { 4,  8, 1, VSD_S, 0 },
+    { 3,  8, 1, VSD_S, 0 },
+    { 2,  8, 2, VSD_S, 0 },
+    { 4,  8, 2, VSD_S, 0 },
+    { 2,  4, 0, VSD_S | VSD_L, 0 },
+    { 3,  8, 3, VSD_S, VSD_ACC_SHARP },
+    { 5,  8, 3, VSD_S, 0 },
+    { 3,  4, 0, VSD_S, 0 },
+    { 3,  8, 4, VSD_S, VSD_ACC_NATURAL },
+    { 5,  8, 4, VSD_S, VSD_ACC_NATURAL },
+    { 3,  4, 0, VSD_S, 0 },
+};
+
+static const VsdCol vsd_cols_wav[] = {
+    { 3,  8, 1, VSD_S, 0 },
+    { 3, 16, 1, VSD_S, 0 },
+    { 3, 16, 1, VSD_S, 0 },
+    { 3, 16, 2, VSD_S, 0 },
+    { 6, 16, 2, VSD_S, 0 },
+    { 7, 16, 2, VSD_S, 0 },
+    { 6, 16, 2, VSD_S | VSD_B, 0 },
+    { 3,  8, 3, VSD_S, 0 },
+    { 3, 16, 3, VSD_S, 0 },
+    { 3, 16, 3, VSD_S, 0 },
+    { 3, 16, 4, VSD_S, 0 },
+    { 2, 16, 4, VSD_S, 0 },
+    { 1, 16, 4, VSD_S, 0 },
+    { 2, 16, 4, VSD_S, 0 },
+};
+
+static const VsdCol vsd_cols_flac[] = {
+    {  8, 16, 1, 0, 0 }, {  4, 16, 1, 0, 0 }, { -1, 16, 1, 0, 0 }, {  0, 16, 1, 0, 0 },
+    { -1, 16, 2, 0, 0 }, {  4, 16, 2, 0, 0 }, { -1, 16, 2, 0, 0 }, {  4, 16, 2, 0, 0 },
+    {  8, 16, 3, 0, 0 }, {  4, 16, 3, 0, 0 }, { -1, 16, 3, 0, 0 }, {  0, 16, 3, 0, 0 },
+    { -1, 16, 4, 0, 0 }, {  4, 16, 4, 0, 0 }, { -1, 16, 4, 0, 0 }, {  4, 16, 4, 0, 0 },
+};
+
+static const VsdCol vsd_cols_ogg[] = {
+    { -6, 8, 1, 0, 0 },
+    { -5, 8, 1, 0, 0 },
+    {  0, 4, 0, 0, 0 },
+    { -1, 4, 0, VSD_B, 0 },
+    { -4, 8, 2, 0, 0 },
+    { -3, 8, 2, 0, 0 },
+    {  2, 4, 0, 0, 0 },
+    {  1, 4, 0, VSD_L, 0 },
+    { -3, 8, 3, 0, 0 },
+    { -2, 8, 3, 0, 0 },
+    {  3, 4, 0, 0, 0 },
+    {  1, 4, 0, 0, 0 },
+};
+
+static const VsdCol vsd_cols_aac[] = {
+    { 4,  8, 1, 0, 0 }, { 4, 16, 1, 0, 0 }, { 4, 16, 1, VSD_T, 0 }, { 4, 16, 1, 0, 0 },
+    { 4,  8, 2, 0, 0 }, { 4, 16, 2, 0, 0 }, { 4, 16, 2, VSD_T, 0 }, { 4, 16, 2, 0, 0 },
+    { 4,  8, 3, 0, 0 }, { 4,  8, 3, VSD_L, 0 },
+    { 4,  8, 4, 0, 0 }, { 4, 16, 4, 0, 0 }, { 4, 16, 4, VSD_T, 0 }, { 4, 16, 4, 0, 0 },
+    { 4,  8, 5, 0, 0 }, { 4, 16, 5, 0, 0 }, { 4, 16, 5, VSD_T, 0 }, { 4, 16, 5, 0, 0 },
+    { 4, 16, 6, 0, 0 }, { 4, 16, 6, VSD_T, 0 }, { 4, 16, 6, 0, 0 },
+    { 4, 16, 6, VSD_P, 0 }, { 4, 16, 6, VSD_T, 0 }, { 4, 16, 6, 0, 0 },
+};
+
+#undef VSD_S
+#undef VSD_B
+#undef VSD_L
+#undef VSD_T
+#undef VSD_P
+
+static const VsdScore vsd_scores[] = {
+    [VSD_CARD_MP3]  = { { 1.000, 0.972, 0.968 }, { 0.958, 0.905, 0.898 }, { 0.46, 0.20, 0.18 },
+                        VSD_CLEF_BASS, 5, 2, 4, vsd_cols_mp3, G_N_ELEMENTS (vsd_cols_mp3) },
+    [VSD_CARD_WAV]  = { { 1.000, 0.988, 0.950 }, { 0.955, 0.930, 0.855 }, { 0.42, 0.34, 0.14 },
+                        VSD_CLEF_TREBLE, 5, 0, 2, vsd_cols_wav, G_N_ELEMENTS (vsd_cols_wav) },
+    [VSD_CARD_FLAC] = { { 0.976, 0.976, 0.976 }, { 0.905, 0.905, 0.905 }, { 0.30, 0.30, 0.30 },
+                        VSD_CLEF_BASS, 5, 1, 4, vsd_cols_flac, G_N_ELEMENTS (vsd_cols_flac) },
+    [VSD_CARD_OGG]  = { { 0.972, 0.992, 0.966 }, { 0.900, 0.940, 0.890 }, { 0.20, 0.36, 0.20 },
+                        VSD_CLEF_TREBLE, 5, 3, 3, vsd_cols_ogg, G_N_ELEMENTS (vsd_cols_ogg) },
+    [VSD_CARD_AAC]  = { { 0.984, 0.972, 1.000 }, { 0.925, 0.905, 0.958 }, { 0.33, 0.24, 0.45 },
+                        VSD_CLEF_DRUMS, 1, 0, 3, vsd_cols_aac, G_N_ELEMENTS (vsd_cols_aac) },
+};
+
+static const gint8 vsd_sharp_pos[2][5] = {
+    { 0, 3, -1, 2, 5 },
+    { 2, 5,  1, 4, 7 },
+};
+
+static double
+vsd_col_space (guint8 dur)
+{
+    return dur >= 16 ? 1.4 : dur == 8 ? 1.8 : dur == 4 ? 2.5 : 3.8;
+}
+
+static gboolean
+vsd_stems_up (const VsdScore *score,
+              guint           from,
+              guint           to)
+{
+    int far = 0;
+
+    if (score->clef == VSD_CLEF_DRUMS)
+        return TRUE;
+    for (guint i = from; i < to; i++)
+    {
+        int p = score->cols[i].head;
+
+        if (ABS (p - 4) > ABS (far))
+            far = p - 4;
+    }
+    return far > 0;
+}
+
+static void
+vsd_draw_ledgers (cairo_t *cr,
+                  double   x,
+                  int      pos,
+                  double   top,
+                  double   sp)
+{
+    for (int p = 10; p <= pos; p += 2)
+    {
+        cairo_move_to (cr, x - 0.95 * sp, top + p * sp / 2);
+        cairo_line_to (cr, x + 0.95 * sp, top + p * sp / 2);
+    }
+    for (int p = -2; p >= pos; p -= 2)
+    {
+        cairo_move_to (cr, x - 0.95 * sp, top + p * sp / 2);
+        cairo_line_to (cr, x + 0.95 * sp, top + p * sp / 2);
+    }
+    cairo_stroke (cr);
+}
+
+static void
+vsd_draw_score_card (cairo_t        *cr,
+                     int             size,
+                     const VsdScore *score)
+{
+    const double clef_w = score->clef == VSD_CLEF_TREBLE ? 2.7 : score->clef == VSD_CLEF_BASS ? 3.1 : 1.6;
+    const double key_w = score->sharps > 0 ? score->sharps * 0.95 + 0.4 : 0.0;
+    double left = size * 0.10, right = size * 0.90, width_units, units_max = 0.0, sp, line, dist, first;
+    double header[VSD_MAX_SYSTEMS], natural[VSD_MAX_SYSTEMS], fixed[VSD_MAX_SYSTEMS];
+    guint from[VSD_MAX_SYSTEMS], to[VSD_MAX_SYSTEMS], systems = 0, n = score->n_cols;
+    double *x, *top, *stem_end;
+    gboolean *up;
+
+    for (guint i = 0, start = 0; i < n && systems < VSD_MAX_SYSTEMS; i++)
+    {
+        if ((score->cols[i].bits & VSD_COL_SYSTEM) || i + 1 == n)
+        {
+            from[systems] = start;
+            to[systems] = i + 1;
+            systems++;
+            start = i + 1;
+        }
+    }
+    n = to[systems - 1];
+
+    for (guint k = 0; k < systems; k++)
+    {
+        header[k] = clef_w + 0.5 + key_w + (k == 0 ? 2.6 : 0.3);
+        natural[k] = 0.0;
+        fixed[k] = 0.3;
+        for (guint i = from[k]; i < to[k]; i++)
+        {
+            natural[k] += vsd_col_space (score->cols[i].dur);
+            if (score->cols[i].acc != 0)
+                fixed[k] += 1.0;
+            if ((score->cols[i].bits & VSD_COL_BAR) && i + 1 < to[k])
+                fixed[k] += 0.9;
+        }
+        units_max = MAX (units_max, header[k] + natural[k] + fixed[k]);
+    }
+    sp = (right - left) / units_max;
+    width_units = units_max;
+    line = MAX (0.8, sp * 0.09);
+    dist = (score->lines == 1 ? 7.0 : 9.0) * sp;
+    first = size * (systems > 1 ? 0.555 : 0.58) - (systems - 1) * dist / 2 + (score->lines == 1 ? 1.2 * sp : 0.0);
+    x = g_newa (double, n);
+    top = g_newa (double, n);
+    stem_end = g_newa (double, n);
+    up = g_newa (gboolean, n);
+
+    vsd_draw_paper (cr, size, score->center, score->edge, score->frame);
+
+    for (guint k = 0; k < systems; k++)
+    {
+        double t = first + k * dist - 2 * sp;
+        double stretch = natural[k] > 0 ? (width_units - header[k] - fixed[k]) / natural[k] : 1.0;
+        double sys_right = right, cursor, bar_top, bar_bottom;
+
+        if (k > 0 && k + 1 == systems && stretch > 1.35)
+        {
+            stretch = 1.1;
+            sys_right = left + (header[k] + natural[k] * stretch + fixed[k]) * sp;
+        }
+        bar_top = score->lines == 1 ? t + sp : t;
+        bar_bottom = score->lines == 1 ? t + 3 * sp : t + 4 * sp;
+
+        vsd_draw_staff (cr, left, sys_right, t, sp, score->lines);
+        vsd_draw_clef (cr, score->clef, left + 0.15 * sp, t, sp);
+        for (int s = 0; s < score->sharps && s < 5; s++)
+            vsd_draw_accidental (cr, VSD_ACC_SHARP, left + (clef_w + 0.5 + 0.45 + s * 0.95) * sp,
+                                 t + vsd_sharp_pos[score->clef == VSD_CLEF_BASS][s] * sp / 2, sp);
+        cursor = left + (clef_w + 0.5 + key_w) * sp;
+        if (k == 0)
+        {
+            vsd_draw_time_digit (cr, score->beats, cursor, t, sp);
+            vsd_draw_time_digit (cr, 4, cursor, t + 2 * sp, sp);
+            cursor += 2.6 * sp;
+        }
+        else
+        {
+            cursor += 0.3 * sp;
+        }
+
+        cairo_set_line_cap (cr, CAIRO_LINE_CAP_BUTT);
+        cairo_set_line_width (cr, line);
+        for (guint i = from[k]; i < to[k]; i++)
+        {
+            if (score->cols[i].acc != 0)
+                cursor += 1.0 * sp;
+            x[i] = cursor + 0.6 * sp;
+            top[i] = t;
+            cursor += vsd_col_space (score->cols[i].dur) * stretch * sp;
+            if ((score->cols[i].bits & VSD_COL_BAR) && i + 1 < to[k])
+            {
+                cairo_move_to (cr, cursor + 0.2 * sp, bar_top);
+                cairo_line_to (cr, cursor + 0.2 * sp, bar_bottom);
+                cursor += 0.9 * sp;
+            }
+        }
+        cairo_move_to (cr, sys_right - line / 2, bar_top);
+        cairo_line_to (cr, sys_right - line / 2, bar_bottom);
+        cairo_stroke (cr);
+    }
+
+    for (guint i = 0; i < n; )
+    {
+        const VsdCol *c = &score->cols[i];
+        guint j = i + 1;
+
+        while (c->beam != 0 && j < n && score->cols[j].beam == c->beam && top[j] == top[i])
+            j++;
+        for (guint k = i; k < j; k++)
+            up[k] = vsd_stems_up (score, i, j);
+        if (j - i > 1)
+        {
+            gboolean u = up[i];
+            int beams = 1;
+            double t = top[i], len, min_len, y0, y1, dy, shift = 0.0, sx0, sx1, h = u ? 0.48 * sp : -0.48 * sp;
+
+            for (guint k = i; k < j; k++)
+                if (score->cols[k].dur >= 16)
+                    beams = 2;
+            len = (3.3 + 0.5 * (beams - 1)) * sp;
+            min_len = (2.9 + 0.6 * (beams - 1)) * sp;
+            sx0 = x[i] + (u ? 0.51 : -0.51) * sp;
+            sx1 = x[j - 1] + (u ? 0.51 : -0.51) * sp;
+            y0 = t + c->head * sp / 2 + (u ? -len : len);
+            y1 = t + score->cols[j - 1].head * sp / 2 + (u ? -len : len);
+            dy = CLAMP (y1 - y0, -0.9 * sp, 0.9 * sp);
+            for (guint k = i; k < j; k++)
+            {
+                double sx = x[k] + (u ? 0.51 : -0.51) * sp;
+                double b = y0 + dy * (sx - sx0) / (sx1 - sx0);
+                double head = t + score->cols[k].head * sp / 2;
+
+                shift = MAX (shift, u ? b - (head - min_len) : (head + min_len) - b);
+            }
+            y0 += u ? -shift : shift;
+            for (guint k = i; k < j; k++)
+            {
+                double sx = x[k] + (u ? 0.51 : -0.51) * sp;
+
+                stem_end[k] = y0 + dy * (sx - sx0) / (sx1 - sx0);
+            }
+            sx0 -= line / 2;
+            sx1 += line / 2;
+            cairo_move_to (cr, sx0, y0);
+            cairo_line_to (cr, sx1, y0 + dy);
+            cairo_line_to (cr, sx1, y0 + dy + h);
+            cairo_line_to (cr, sx0, y0 + h);
+            cairo_close_path (cr);
+            for (guint k = i; k + 1 < j; k++)
+            {
+                double ax, bx, off = u ? 0.75 * sp : -0.75 * sp;
+
+                if (score->cols[k].dur < 16 || score->cols[k + 1].dur < 16 ||
+                    (score->cols[k + 1].bits & VSD_COL_SPLIT))
+                    continue;
+                ax = x[k] + (u ? 0.51 : -0.51) * sp - line / 2;
+                bx = x[k + 1] + (u ? 0.51 : -0.51) * sp + line / 2;
+                cairo_move_to (cr, ax, y0 + off + dy * (ax - sx0) / (sx1 - sx0));
+                cairo_line_to (cr, bx, y0 + off + dy * (bx - sx0) / (sx1 - sx0));
+                cairo_line_to (cr, bx, y0 + off + h + dy * (bx - sx0) / (sx1 - sx0));
+                cairo_line_to (cr, ax, y0 + off + h + dy * (ax - sx0) / (sx1 - sx0));
+                cairo_close_path (cr);
+            }
+            cairo_fill (cr);
+        }
+        else
+        {
+            stem_end[i] = top[i] + c->head * sp / 2 + (up[i] ? -3.3 * sp : 3.3 * sp);
+        }
+        i = j;
+    }
+
+    for (guint i = 0; i < n; i++)
+    {
+        const VsdCol *c = &score->cols[i];
+        double y = top[i] + c->head * sp / 2;
+        double sx = x[i] + (up[i] ? 0.51 : -0.51) * sp;
+
+        if (score->lines == 5)
+        {
+            cairo_set_line_width (cr, line);
+            vsd_draw_ledgers (cr, x[i], c->head, top[i], sp);
+        }
+        cairo_set_line_width (cr, line);
+        cairo_move_to (cr, sx, y + (up[i] ? -0.1 : 0.1) * sp);
+        cairo_line_to (cr, sx, stem_end[i]);
+        cairo_stroke (cr);
+        vsd_notehead (cr, x[i], y, sp);
+        if (c->acc != 0)
+            vsd_draw_accidental (cr, c->acc, x[i] - (c->acc == VSD_ACC_SHARP ? 1.25 : 1.05) * sp, y, sp);
+
+        if (c->bits & VSD_COL_STACCATO)
+        {
+            int dot = up[i] ? c->head + 2 : c->head - 2;
+
+            if (dot >= 0 && dot <= 8 && dot % 2 == 0)
+                dot += up[i] ? 1 : -1;
+            cairo_new_sub_path (cr);
+            cairo_arc (cr, x[i], top[i] + dot * sp / 2, 0.17 * sp, 0, 2 * G_PI);
+            cairo_fill (cr);
+        }
+        if (c->bits & VSD_COL_TRIPLET)
+        {
+            double ty = up[i] ? stem_end[i] - 1.35 * sp : stem_end[i] + 0.35 * sp;
+
+            vsd_time_digit3 (cr, sx - 0.38 * sp, ty, 0.5 * sp);
+        }
+    }
+}
+
+static void
+vsd_draw_video_card (cairo_t *cr,
+                     int      size)
+{
+    cairo_pattern_t *g = cairo_pattern_create_linear (0, 0, 0, size);
+    double k = size * 0.42 / 10.0;
+
+    cairo_pattern_add_color_stop_rgb (g, 0, 0.37, 0.36, 0.39);
+    cairo_pattern_add_color_stop_rgb (g, 1, 0.20, 0.19, 0.22);
+    cairo_rectangle (cr, 0, 0, size, size);
+    cairo_set_source (cr, g);
+    cairo_fill (cr);
+    cairo_pattern_destroy (g);
+
+    cairo_set_source_rgba (cr, 1, 1, 1, 0.92);
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_width (cr, VSD_GLYPH_STROKE * k);
+    vsd_draw_icon (cr, TRUE, (size - 9 * k) / 2 + k, (size - 10 * k) / 2 + size * 0.06, k);
+}
+
+static VsdCard
+vsd_card_for (const char *format)
+{
+    if (format == NULL)
+        return VSD_CARD_CLASSIC;
+    if (g_str_equal (format, "MPEG audio"))
+        return VSD_CARD_MP3;
+    if (g_str_equal (format, "WAV"))
+        return VSD_CARD_WAV;
+    if (g_str_equal (format, "FLAC"))
+        return VSD_CARD_FLAC;
+    if (g_str_equal (format, "Ogg"))
+        return VSD_CARD_OGG;
+    if (g_str_equal (format, "AAC ADTS"))
+        return VSD_CARD_AAC;
+    return VSD_CARD_CLASSIC;
+}
+
+static cairo_surface_t *
+vsd_make_tile (int      size,
+               gboolean video,
+               VsdCard  card)
+{
+    cairo_surface_t *s = cairo_image_surface_create (CAIRO_FORMAT_RGB24, size, size);
+    cairo_t *cr = cairo_create (s);
+
+    if (video)
+        vsd_draw_video_card (cr, size);
+    else if (card == VSD_CARD_CLASSIC)
+        vsd_draw_music_card (cr, size);
+    else
+        vsd_draw_score_card (cr, size, &vsd_scores[card]);
+    cairo_destroy (cr);
+    return s;
+}
+
+static gboolean
+vsd_save_png (cairo_surface_t *s,
+              const char      *path)
+{
+    g_autofree char *tmp = g_strconcat (path, ".nvsd-tmp.png", NULL);
+
+    if (cairo_surface_write_to_png (s, tmp) != CAIRO_STATUS_SUCCESS)
+    {
+        g_unlink (tmp);
+        return FALSE;
+    }
+    if (g_rename (tmp, path) != 0)
+    {
+        g_unlink (tmp);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static char **
+vsd_thumbnailer_dirs (void)
+{
+    GPtrArray *dirs = g_ptr_array_new_with_free_func (g_free);
+    const char *const *sys = g_get_system_data_dirs ();
+    const char *const fallback[] = { "/usr/local/share", "/usr/share", NULL };
+
+    g_ptr_array_add (dirs, g_build_filename (g_get_user_data_dir (), "thumbnailers", NULL));
+    for (int pass = 0; pass < 2; pass++)
+    {
+        for (const char *const *d = pass == 0 ? sys : fallback; *d != NULL; d++)
+        {
+            g_autofree char *path = g_build_filename (*d, "thumbnailers", NULL);
+            gboolean dup = FALSE;
+
+            for (guint i = 0; i < dirs->len; i++)
+                dup |= g_str_equal (dirs->pdata[i], path);
+            if (!dup)
+                g_ptr_array_add (dirs, g_steal_pointer (&path));
+        }
+    }
+    g_ptr_array_add (dirs, NULL);
+    return (char **) g_ptr_array_free (dirs, FALSE);
+}
+
+static char *
+vsd_find_original (const char *mime)
+{
+    g_auto (GStrv) dirs = vsd_thumbnailer_dirs ();
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        for (char **d = dirs; *d != NULL; d++)
+        {
+            g_autoptr (GDir) dir = g_dir_open (*d, 0, NULL);
+            const char *name;
+
+            while (dir != NULL && (name = g_dir_read_name (dir)) != NULL)
+            {
+                g_autoptr (GKeyFile) kf = g_key_file_new ();
+                g_autofree char *path = NULL, *exec = NULL, *try_exec = NULL;
+                g_auto (GStrv) mimes = NULL, argv = NULL;
+                gboolean match = FALSE;
+
+                if (!g_str_has_suffix (name, ".thumbnailer") || g_str_has_prefix (name, VSD_THUMB_FILE_PFX))
+                    continue;
+                path = g_build_filename (*d, name, NULL);
+                if (!g_key_file_load_from_file (kf, path, 0, NULL))
+                    continue;
+                exec = g_key_file_get_string (kf, "Thumbnailer Entry", "Exec", NULL);
+                mimes = g_key_file_get_string_list (kf, "Thumbnailer Entry", "MimeType", NULL, NULL);
+                if (exec == NULL || mimes == NULL || !g_shell_parse_argv (exec, NULL, &argv, NULL))
+                    continue;
+                {
+                    g_autofree char *base = g_path_get_basename (argv[0]);
+                    if (g_str_equal (base, VSD_THUMB_NAME))
+                        continue;
+                }
+                try_exec = g_key_file_get_string (kf, "Thumbnailer Entry", "TryExec", NULL);
+                if (try_exec != NULL)
+                {
+                    g_autofree char *found = g_find_program_in_path (try_exec);
+                    if (found == NULL)
+                        continue;
+                }
+                for (char **m = mimes; *m != NULL && !match; m++)
+                    match = pass == 0 ? g_ascii_strcasecmp (*m, mime) == 0
+                                      : g_content_type_equals (*m, mime);
+                if (match)
+                    return g_steal_pointer (&exec);
+            }
+        }
+    }
+    return NULL;
+}
+
+static char *
+vsd_expand (const char *elem,
+            int         size,
+            const char *mime,
+            const char *in,
+            const char *out)
+{
+    GString *str = g_string_new (NULL);
+
+    for (const char *p = elem; *p; p++)
+    {
+        if (*p != '%' || p[1] == '\0')
+        {
+            g_string_append_c (str, *p);
+            continue;
+        }
+        switch (*++p)
+        {
+            case 'u':
+            {
+                g_autofree char *uri = g_filename_to_uri (in, NULL, NULL);
+                g_string_append (str, uri ? uri : in);
+                break;
+            }
+            case 'i': g_string_append (str, in); break;
+            case 'o': g_string_append (str, out); break;
+            case 's': g_string_append_printf (str, "%d", size); break;
+            case 'm': g_string_append (str, mime); break;
+            case '%': g_string_append_c (str, '%'); break;
+            default:  g_string_append_c (str, '%'); g_string_append_c (str, *p); break;
+        }
+    }
+    return g_string_free (str, FALSE);
+}
+
+static gboolean
+vsd_run_original (const char *exec,
+                  int         size,
+                  const char *mime,
+                  const char *in,
+                  const char *out)
+{
+    g_auto (GStrv) argv = NULL;
+    g_autoptr (GError) error = NULL;
+    int status = 0;
+
+    if (!g_shell_parse_argv (exec, NULL, &argv, NULL))
+        return FALSE;
+    for (char **a = argv; *a != NULL; a++)
+    {
+        char *e = vsd_expand (*a, size, mime, in, out);
+        g_free (*a);
+        *a = e;
+    }
+    g_setenv (VSD_THUMB_GUARD, "1", TRUE);
+    if (!g_spawn_sync (NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, &status, &error))
+    {
+        g_printerr ("%s: %s\n", VSD_THUMB_NAME, error->message);
+        return FALSE;
+    }
+    if (!g_spawn_check_wait_status (status, NULL))
+        return FALSE;
+    return g_file_test (out, G_FILE_TEST_IS_REGULAR);
+}
+
+static int
+vsd_thumbnailer_main (int    argc,
+                      char **argv)
+{
+    int size = 256;
+    const char *in = NULL, *out = NULL, *mime_arg = NULL;
+    g_autofree char *mime = NULL, *label = NULL, *orig = NULL, *in_path = NULL;
+    g_autoptr (GFile) file = NULL;
+    VsdMedia media;
+    gboolean video, have_thumb = FALSE;
+    guint hints = 0;
+    cairo_surface_t *surface;
+
+    for (int i = 1; i < argc; i++)
+    {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+
+        if (g_str_equal (a, "--version"))
+        {
+            g_print ("%s\n", VSD_THUMB_NAME);
+            return 0;
+        }
+        if (v == NULL)
+            break;
+        if (g_str_equal (a, "-s"))      size = atoi (v);
+        else if (g_str_equal (a, "-i")) in = v;
+        else if (g_str_equal (a, "-u")) in_path = g_filename_from_uri (v, NULL, NULL);
+        else if (g_str_equal (a, "-o")) out = v;
+        else if (g_str_equal (a, "-m")) mime_arg = v;
+        else continue;
+        i++;
+    }
+    if (in == NULL)
+        in = in_path;
+    if (in == NULL || out == NULL)
+    {
+        g_printerr ("Usage: %s -s SIZE -i INPUT -o OUTPUT.png [-m MIME/TYPE]\n", VSD_THUMB_NAME);
+        return 2;
+    }
+    if (g_getenv (VSD_THUMB_GUARD) != NULL)
+        return 1;
+    size = CLAMP (size, 16, 2048);
+
+    if (mime_arg != NULL && strchr (mime_arg, '/') != NULL)
+    {
+        mime = g_strdup (mime_arg);
+    }
+    else
+    {
+        guint8 head[4096];
+        gsize n = 0;
+        FILE *f = fopen (in, "rb");
+        if (f != NULL)
+        {
+            n = fread (head, 1, sizeof head, f);
+            fclose (f);
+        }
+        g_autofree char *ct = g_content_type_guess (in, head, n, NULL);
+        mime = g_content_type_get_mime_type (ct);
+        if (mime == NULL)
+            mime = g_strdup ("application/octet-stream");
+    }
+
+    {
+        g_autofree char *lower = g_ascii_strdown (in, -1);
+        if (g_str_has_suffix (lower, ".mp3") || g_str_has_suffix (lower, ".mp2") ||
+            g_str_has_suffix (lower, ".aac") || g_str_equal (mime, "audio/mpeg") ||
+            g_str_has_prefix (mime, "audio/aac") || g_str_has_prefix (mime, "audio/x-aac") ||
+            g_str_has_prefix (mime, "audio/mp"))
+            hints |= VSD_HINT_MPEG_AUDIO;
+    }
+
+    file = g_file_new_for_path (in);
+    if (vsd_probe (file, hints, NULL, &media))
+        label = vsd_format_human (media.seconds);
+    else
+        memset (&media, 0, sizeof media);
+    video = media.width > 0 || g_str_has_prefix (mime, "video/");
+
+    orig = vsd_find_original (mime);
+    if (orig != NULL)
+        have_thumb = vsd_run_original (orig, size, mime, in, out);
+
+    if (have_thumb)
+    {
+        cairo_surface_t *png;
+        cairo_t *cr;
+        int w, h;
+
+        if (label == NULL)
+            return 0;
+        png = cairo_image_surface_create_from_png (out);
+        if (cairo_surface_status (png) != CAIRO_STATUS_SUCCESS)
+        {
+            cairo_surface_destroy (png);
+            return 0;
+        }
+        w = cairo_image_surface_get_width (png);
+        h = cairo_image_surface_get_height (png);
+        cr = cairo_create (png);
+        vsd_draw_badge (cr, w, h, label, video);
+        cairo_destroy (cr);
+        vsd_save_png (png, out);
+        cairo_surface_destroy (png);
+        return 0;
+    }
+
+    if (label == NULL)
+        return 1;
+
+    surface = vsd_make_tile (size, video, vsd_card_for (media.format));
+    {
+        cairo_t *cr = cairo_create (surface);
+        vsd_draw_badge (cr, size, size, label, video);
+        cairo_destroy (cr);
+    }
+    have_thumb = vsd_save_png (surface, out);
+    cairo_surface_destroy (surface);
+    return have_thumb ? 0 : 1;
+}
+
+int
+main (int    argc,
+      char **argv)
+{
+    return vsd_thumbnailer_main (argc, argv);
+}
+#endif
 C_SOURCE
 }
 
-# -----------------------------------------------------------------------------
-#  Dystrybucja / distribution
-# -----------------------------------------------------------------------------
 OS_ID="" OS_LIKE="" OS_VERSION="" OS_PRETTY="" FAMILY="unknown"
 PKGS=()
 
-# Pole z os-release czytane jako tekst (bez wykonywania pliku: jego zmienne,
-# np. NAME czy VERSION, kolidowałyby ze zmiennymi skryptu).
 os_field() {
     sed -n "s/^$1=//p" "$OS_RELEASE" 2>/dev/null | head -n1 |
         sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
@@ -2366,14 +4555,13 @@ detect_distro() {
     for word in $OS_ID $OS_LIKE; do
         case "$word" in
             fedora|rhel|centos|rocky|almalinux|nobara|ultramarine)
-                FAMILY=fedora; PKGS=(gcc pkgconf-pkg-config nautilus-devel); break ;;
+                FAMILY=fedora; PKGS=(gcc pkgconf-pkg-config nautilus-devel cairo-devel); break ;;
             debian|ubuntu|linuxmint|pop|elementary|zorin|kali|raspbian|neon|devuan)
-                FAMILY=debian; PKGS=(gcc libc6-dev pkg-config libnautilus-extension-dev); break ;;
+                FAMILY=debian; PKGS=(gcc libc6-dev pkg-config libnautilus-extension-dev libcairo2-dev); break ;;
             arch|archlinux|manjaro|endeavouros|cachyos|garuda|artix)
-                # Na Archu nagłówki i .pc są w pakiecie libnautilus-extension (zależność nautilusa).
-                FAMILY=arch; PKGS=(gcc pkgconf libnautilus-extension); break ;;
+                FAMILY=arch; PKGS=(gcc pkgconf libnautilus-extension cairo); break ;;
             opensuse*|suse|sles)
-                FAMILY=suse; PKGS=(gcc pkg-config nautilus-devel); break ;;
+                FAMILY=suse; PKGS=(gcc pkg-config nautilus-devel cairo-devel); break ;;
         esac
     done
 }
@@ -2390,7 +4578,6 @@ pkg_installed() {
     done
 }
 
-# Uruchamia polecenie jako root: sudo, doas albo pkexec.
 as_root() {
     if command -v sudo >/dev/null; then sudo "$@"
     elif command -v doas >/dev/null; then doas "$@"
@@ -2452,9 +4639,6 @@ check_system() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-#  Budowanie i instalacja / building and installing
-# -----------------------------------------------------------------------------
 compile() {
     local out="$1" flags
     command -v gcc >/dev/null || die "$(t 'Brak kompilatora gcc.' 'gcc compiler not found.')"
@@ -2467,12 +4651,25 @@ compile() {
     fi
 
     write_source "$BUILD_DIR/$EXT_NAME.c"
-    flags="$(pkg-config --cflags --libs "$PC" gio-2.0)"
+    flags="$(pkg-config --cflags --libs "$PC" gio-2.0 gmodule-no-export-2.0)"
     msg "$(t 'Kompilacja (libnautilus-extension %s)' 'Compiling (libnautilus-extension %s)')" "$(pkg-config --modversion "$PC" 2>/dev/null || echo '?')"
-    # shellcheck disable=SC2086
     gcc -std=gnu11 -O2 -g -Wall -Wextra -fPIC -shared \
         -Wl,--no-undefined -Wl,-z,relro,-z,now \
         -o "$out" "$BUILD_DIR/$EXT_NAME.c" $flags
+}
+
+compile_thumbnailer() {
+    local out="$1" flags
+    if ! pkg-config --exists cairo gio-2.0; then
+        warn "$(t 'Brak nagłówków cairo; pomijam widok siatki (kolumny działają).' 'cairo headers missing; skipping the grid view (columns still work).')"
+        return 1
+    fi
+    [[ -f "$BUILD_DIR/$EXT_NAME.c" ]] || write_source "$BUILD_DIR/$EXT_NAME.c"
+    flags="$(pkg-config --cflags --libs gio-2.0 cairo)"
+    msg "$(t 'Kompilacja miniaturyzera widoku siatki (cairo %s)' 'Compiling the grid-view thumbnailer (cairo %s)')" "$(pkg-config --modversion cairo 2>/dev/null || echo '?')"
+    gcc -std=gnu11 -O2 -g -Wall -Wextra -DVSD_THUMBNAILER \
+        -Wl,-z,relro,-z,now -fPIE -pie \
+        -o "$out" "$BUILD_DIR/$EXT_NAME.c" $flags -lm
 }
 
 extension_dir() {
@@ -2487,7 +4684,6 @@ extension_dir() {
     printf '%s\n' "${dir:-/usr/lib/nautilus/extensions-4}"
 }
 
-# Wszystkie miejsca, gdzie mogła trafić wtyczka (do usuwania).
 candidate_dirs() {
     local seen="" d
     for d in "$(extension_dir)" /usr/lib64/nautilus/extensions-4 /usr/lib/nautilus/extensions-4 /usr/lib/*/nautilus/extensions-4; do
@@ -2557,14 +4753,85 @@ restart_nautilus() {
     warn "$(t 'Zmiany zadziałają po restarcie Nautilusa: nautilus -q' 'Changes take effect after restarting Nautilus: nautilus -q')"
 }
 
-# -----------------------------------------------------------------------------
-#  Polecenia / commands
-# -----------------------------------------------------------------------------
+purge_media_thumbnails() {
+    [[ -d "$THUMB_CACHE" ]] || return 0
+    local d dirs=() files=()
+    for d in normal large x-large xx-large fail; do
+        [[ -d "$THUMB_CACHE/$d" ]] && dirs+=("$THUMB_CACHE/$d")
+    done
+    (( ${#dirs[@]} )) || return 0
+    mapfile -d '' -t files < <(LC_ALL=C grep -ralZiE --include='*.png' \
+        "Thumb::URI.file://[^[:cntrl:]]*\.(${MEDIA_EXT_RE})" -- "${dirs[@]}" 2>/dev/null || true)
+    (( ${#files[@]} )) || return 0
+    printf '%s\0' "${files[@]}" | xargs -0 rm -f --
+    msg "$(t 'Usunięte z pamięci podręcznej miniatury audio/wideo: %s (wygenerują się ponownie).' 'Removed cached audio/video thumbnails: %s (they will be regenerated).')" "${#files[@]}"
+}
+
+write_thumbnailer_entry() {
+    local mimes="$1"
+    mkdir -p "$THUMB_DIR"
+    cat > "$THUMB_DIR/$THUMB_FILE" <<EOF
+[Thumbnailer Entry]
+TryExec=$THUMB_BIN
+Exec=$THUMB_BIN -s %s -m %m -i %i -o %o
+MimeType=$mimes
+EOF
+    msg "$(t 'Zapisano %s' 'Written %s')" "$THUMB_DIR/$THUMB_FILE"
+}
+
+grid_installed() {
+    [[ -e "$THUMB_BIN" || -e "$THUMB_DIR/$THUMB_FILE" ]]
+}
+
+grid_remove() {
+    local removed=1
+    if [[ -e "$THUMB_DIR/$THUMB_FILE" ]]; then
+        msg "$(t 'Usuwanie %s' 'Removing %s')" "$THUMB_DIR/$THUMB_FILE"
+        rm -f -- "$THUMB_DIR/$THUMB_FILE"
+        removed=0
+    fi
+    if [[ -e "$THUMB_BIN" ]]; then
+        msg "$(t 'Usuwanie %s' 'Removing %s')" "$THUMB_BIN"
+        as_root rm -f "$THUMB_BIN"
+        removed=0
+    fi
+    (( removed == 0 )) && purge_media_thumbnails
+    return $removed
+}
+
+grid_install() {
+    local mode="$1" mimes target
+    case "$mode" in
+        all)   mimes="$VIDEO_MIMES$AUDIO_MIMES" ;;
+        video) mimes="$VIDEO_MIMES" ;;
+    esac
+
+    target="$(readlink -f "$(dirname "$THUMB_BIN")" 2>/dev/null || dirname "$THUMB_BIN")"
+    if [[ "$target" != /usr/* ]]; then
+        warn "$(t '%s nie leży pod /usr (piaskownica miniatur go nie zobaczy); pomijam widok siatki.' '%s is not under /usr (the thumbnail sandbox cannot see it); skipping the grid view.')" "$(dirname "$THUMB_BIN")"
+        return 0
+    fi
+
+    compile_thumbnailer "$BUILD_DIR/${EXT_NAME}-thumbnailer" || {
+        warn "$(t 'Widok siatki pominięty.' 'Grid view skipped.')"
+        return 0
+    }
+    msg "$(t 'Instalacja do %s' 'Installing to %s')" "$THUMB_BIN"
+    as_root install -Dm755 "$BUILD_DIR/${EXT_NAME}-thumbnailer" "$THUMB_BIN"
+    if command -v restorecon >/dev/null; then
+        as_root restorecon "$THUMB_BIN" || true
+    fi
+    write_thumbnailer_entry "$mimes"
+    purge_media_thumbnails
+}
+
 cmd_install() {
-    local show_by_default=0 arg dir
+    local show_by_default=0 grid=all arg dir
     for arg in "$@"; do
         case "$arg" in
             --show-by-default) show_by_default=1 ;;
+            --grid=all|--grid=video|--grid=none) grid="${arg#--grid=}" ;;
+            --no-grid) grid=none ;;
             *) die "$(t 'Nieznana opcja: %s' 'Unknown option: %s')" "$arg" ;;
         esac
     done
@@ -2581,10 +4848,16 @@ cmd_install() {
     msg "$(t 'Instalacja do %s' 'Installing to %s')" "$dir/$SO"
     as_root install -Dm755 "$BUILD_DIR/$SO" "$dir/$SO"
     if command -v restorecon >/dev/null; then
-        as_root restorecon "$dir/$SO" || true   # SELinux (Fedora)
+        as_root restorecon "$dir/$SO" || true
     fi
 
     (( show_by_default )) && columns_default_add
+
+    if [[ "$grid" == none ]]; then
+        grid_installed && grid_remove || true
+    else
+        grid_install "$grid"
+    fi
     restart_nautilus
 
     if [[ "$UI_LANG" == pl ]]; then
@@ -2595,6 +4868,14 @@ Gotowe. Aby zobaczyć kolumny:
   2. Strzałka przy przycisku widoku → „Widoczne kolumny…” →
      zaznacz „Czas trwania”, „Szerokość (px)”, „Wysokość (px)”.
   3. Kliknij nagłówek kolumny, żeby sortować (ponownie: odwrotna kolejność).
+
+Widok siatki (Ctrl+2): miniatury filmów i plików audio dostają w lewym
+górnym rogu ramkę z czasem, np. „▶ 2m 4s”. Miniatury generują się od nowa,
+więc w dużych folderach pojawią się stopniowo.
+
+Porządkowanie: menu widoku (strzałka przy przycisku widoku) → sekcja
+„Audio i wideo” pod „Porządkowanie”: czas trwania, szerokość albo wysokość.
+To samo jest pod prawym klikiem na pustym miejscu folderu.
 
 Język kolumn wynika z języka sesji (polski lub angielski).
 Usunięcie:  $0 uninstall
@@ -2608,6 +4889,14 @@ Done. To see the columns:
      tick "Duration", "Width (px)", "Height (px)".
   3. Click a column header to sort (click again to reverse).
 
+Grid view (Ctrl+2): video and audio thumbnails get a duration badge in the
+top-left corner, e.g. "▶ 2m 4s". Thumbnails are regenerated, so in large
+folders they appear gradually.
+
+Sorting: view menu (arrow next to the view button) → "Audio and Video"
+section below "Sort": duration, width or height. The same options are in the
+right-click menu of an empty folder area.
+
 Column labels follow the session language (Polish or English).
 Uninstall:  $0 uninstall
 EOF
@@ -2618,7 +4907,9 @@ cmd_uninstall() {
     [[ $EUID -ne 0 ]] || die "$(t 'Uruchom jako zwykły użytkownik.' 'Run as a regular user.')"
     detect_distro
     columns_default_remove
-    if remove_files "$SO" "$OLD_SO"; then
+    local grid_removed=1
+    grid_remove && grid_removed=0
+    if remove_files "$SO" "$OLD_SO" || (( grid_removed == 0 )); then
         restart_nautilus
         msg "$(t 'Usunięto. Pakiety deweloperskie zostały; usuń je ręcznie, jeśli nie są potrzebne.' 'Removed. Development packages were kept; remove them manually if not needed.')"
     else
@@ -2630,6 +4921,9 @@ cmd_build() {
     detect_distro
     compile "$PWD/$SO"
     msg "$(t 'Zbudowano: %s' 'Built: %s')" "$PWD/$SO"
+    if compile_thumbnailer "$PWD/${EXT_NAME}-thumbnailer"; then
+        msg "$(t 'Zbudowano: %s' 'Built: %s')" "$PWD/${EXT_NAME}-thumbnailer"
+    fi
 }
 
 cmd_source() {
@@ -2640,19 +4934,22 @@ cmd_source() {
 cmd_help() {
     if [[ "$UI_LANG" == pl ]]; then
         cat <<EOF
-Nautilus Video Size and Duration $NVSD_VERSION — kolumny czasu trwania i rozmiaru obrazu w Nautilusie
+Nautilus Video Size and Duration $NVSD_VERSION — czas trwania i rozmiar obrazu w Nautilusie (lista i siatka)
 
 Użycie: $0 [polecenie] [opcje]
 
 Polecenia:
   install       kompiluje i instaluje (domyślne)
-  uninstall     usuwa rozszerzenie (także wersję 1)
-  build         tylko kompiluje $SO do bieżącego katalogu
+  uninstall     usuwa rozszerzenie i miniaturyzer (także wersję 1)
+  build         tylko kompiluje $SO i miniaturyzer do bieżącego katalogu
   source        zapisuje kod C do bieżącego katalogu
   help          ta pomoc
 
 Opcje:
   --show-by-default   (install) kolumny widoczne domyślnie we wszystkich folderach
+  --grid=all          (install, domyślne) czas na miniaturach wideo i audio w widoku siatki
+  --grid=video        (install) czas tylko na miniaturach wideo
+  --grid=none         (install) bez widoku siatki, tylko kolumny (także --no-grid)
   --lang pl|en        język komunikatów (domyślnie z LANG/LANGUAGE)
 
 Obsługiwane: MP4 M4V M4A M4B MOV 3GP · MKV MKA WEBM · AVI · WMV WMA ASF
@@ -2661,19 +4958,22 @@ Licencja: EUPL-1.2
 EOF
     else
         cat <<EOF
-Nautilus Video Size and Duration $NVSD_VERSION — duration and frame size columns for Nautilus
+Nautilus Video Size and Duration $NVSD_VERSION — duration and frame size in Nautilus (list and grid)
 
 Usage: $0 [command] [options]
 
 Commands:
   install       compile and install (default)
-  uninstall     remove the extension (including version 1)
-  build         only compile $SO into the current directory
+  uninstall     remove the extension and thumbnailer (including version 1)
+  build         only compile $SO and the thumbnailer into the current directory
   source        write the C source into the current directory
   help          this help
 
 Options:
   --show-by-default   (install) show the columns by default in every folder
+  --grid=all          (install, default) duration on video and audio thumbnails in grid view
+  --grid=video        (install) duration on video thumbnails only
+  --grid=none         (install) no grid view, columns only (also --no-grid)
   --lang pl|en        message language (default from LANG/LANGUAGE)
 
 Supported: MP4 M4V M4A M4B MOV 3GP · MKV MKA WEBM · AVI · WMV WMA ASF
