@@ -3,9 +3,19 @@
 Rozszerzenie Nautilusa (Pliki, GNOME) · wersja 2.6.0 · M.T. Jaroszek · [EUPL-1.2](LICENSE)
 
 - **Widok listy:** sortowalne kolumny **Czas trwania**, **Szerokość (px)** i **Wysokość (px)** (PL/EN).
+- <img width="912" height="520" alt="obraz" src="https://github.com/user-attachments/assets/50e9a7a0-bd38-4d16-b7fe-593e656a3a9c" />
+
 - **Widok siatki:** czas w lewym górnym rogu miniatury (`▶ 2m 4s`, `♪ 3m 24s`).
+- <img width="1212" height="161" alt="obraz" src="https://github.com/user-attachments/assets/342dc7ca-6214-463b-a413-d3f759408fbc" />
+
 - **Porządkowanie:** menu widoku → **Audio i wideo** (także pod prawym klikiem): ▼ od najdłuższych/największych, ▲ od najkrótszych/najmniejszych.
+-  <img width="304" height="910" alt="obraz" src="https://github.com/user-attachments/assets/fefd7f9a-bf3b-4914-bc00-a6736852578b" />
+
 - **Formaty:** MP4/M4V/M4A/MOV/3GP, MKV/WebM, AVI, WMV/WMA/ASF, Ogg/Opus, FLAC, WAV, MP3, AAC.
+- <img width="792" height="528" alt="obraz" src="https://github.com/user-attachments/assets/c1740296-e1d8-4dba-b69a-7e5f5269b9e3" />
+
+
+ 
 
 Wymaga Nautilusa 43+. Instalator wykrywa Fedorę, Debiana/Ubuntu, Archa i openSUSE, sam doinstalowuje pakiety i kompiluje kod.
 
@@ -31,6 +41,8 @@ Inne polecenia: `build`, `source`, `help`, `--lang pl|en`. Uruchamiaj jako zwyk�
 | Ogg | odrobina zieleni | Tárrega, *Gran Vals*, t. 13–15 (gitara) |
 | AAC | odrobina fioletu | Ravel, *Boléro*, ostinato werbla |
 | inne | kremowy | jeden takt z fermatą |
+
+
 
 Wszystkie utwory są w domenie publicznej. Nuty *Carmen* według wydania Mutopia Project (CC BY-SA 2.5).
 
